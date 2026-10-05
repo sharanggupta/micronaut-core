@@ -715,6 +715,28 @@ public sealed class DefaultBeanContext implements ConfigurableBeanContext, Watch
     }
 
     /**
+     * Delivers a class change to the class change watches. The event publisher calls this for every
+     * {@link ClassChangeEvent} it publishes, ahead of the listeners of the event.
+     *
+     * @param change The change
+     */
+    @Internal
+    @Experimental
+    public void notifyClassChange(ClassChangeEvent change) {
+        ArgumentUtils.requireNonNull("change", change);
+        watches.classesChanged(change);
+    }
+
+    /**
+     * @return Whether a class change watch is registered and active, so that a publisher of class changes is not empty
+     */
+    @Internal
+    @Experimental
+    public boolean hasClassChangeWatches() {
+        return watches.hasClassChangeWatches();
+    }
+
+    /**
      * The processors fed through an adapter, which see additions only and cannot follow a reload.
      *
      * @return The adapted processors
@@ -2525,10 +2547,6 @@ public sealed class DefaultBeanContext implements ConfigurableBeanContext, Watch
     public void publishEvent(Object event) {
         if (eventsEnabled) {
             Objects.requireNonNull(event, "Event cannot be null");
-            if (event instanceof ClassChangeEvent classChange) {
-                // the class change watches come first, then the listeners of the event
-                watches.classesChanged(classChange);
-            }
             getBean(Argument.of(ApplicationEventPublisher.class, event.getClass())).publishEvent(event);
         }
     }
@@ -2537,9 +2555,6 @@ public sealed class DefaultBeanContext implements ConfigurableBeanContext, Watch
     public Future<Void> publishEventAsync(Object event) {
         if (eventsEnabled) {
             Objects.requireNonNull(event, "Event cannot be null");
-            if (event instanceof ClassChangeEvent classChange) {
-                watches.classesChanged(classChange);
-            }
             return getBean(Argument.of(ApplicationEventPublisher.class, event.getClass())).publishEventAsync(event);
         }
         return CompletableFuture.completedFuture(null);
