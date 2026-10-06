@@ -27,6 +27,7 @@ import io.micronaut.http.body.ByteBodyFactory;
 import io.micronaut.http.body.CloseableByteBody;
 import io.micronaut.http.body.stream.BaseSharedBuffer;
 import io.micronaut.http.body.stream.BaseStreamingByteBody;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.body.stream.BodySizeLimits;
 import io.micronaut.http.body.stream.BufferConsumer;
 import io.micronaut.http.body.stream.SizeLimitTracker;
@@ -45,10 +46,9 @@ import io.netty.contrib.multipart.PostBodyDecoder;
 import io.netty.contrib.multipart.TooManyFormFieldsException;
 import io.netty.contrib.multipart.UndecodedDataLimitExceededException;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Sinks;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -72,7 +72,7 @@ public final class FormDemuxer implements BufferConsumer {
     @Nullable
     private final Upstream upstream;
 
-    private final Sinks.Many<RawFormField> sink = Sinks.many().unicast().onBackpressureBuffer();
+    private final BodyPublishers.Unicast<RawFormField> fields = new BodyPublishers.Unicast<>(RawFormField::close, this::startUpstream, this::cancel);
 
     @Nullable
     private State state = new BeforeField(null);
@@ -120,14 +120,14 @@ public final class FormDemuxer implements BufferConsumer {
         }
     }
 
-    public Flux<RawFormField> fields() {
-        Flux<RawFormField> flux = sink.asFlux()
-            .doOnCancel(this::cancel)
-            .doOnDiscard(RawFormField.class, RawFormField::close);
+    public Publisher<RawFormField> fields() {
+        return fields;
+    }
+
+    private void startUpstream() {
         if (upstream != null) {
-            flux = flux.doOnSubscribe(s -> upstream.start());
+            upstream.start();
         }
-        return flux;
     }
 
     private void cancel() {
@@ -153,7 +153,7 @@ public final class FormDemuxer implements BufferConsumer {
         if (state instanceof StreamingContent sc) {
             sc.baseSharedBuffer.error(e);
         }
-        if (sink.tryEmitError(e).isFailure()) {
+        if (!fields.tryError(e)) {
             LOG.debug("Failed to forward decoder failure", e);
         }
         updateUpstreamDemand();
@@ -215,8 +215,7 @@ public final class FormDemuxer implements BufferConsumer {
     private void emit(FormFieldMetadata metadata, ByteBody content) {
         assert eventLoop == null || eventLoop.inEventLoop();
         CloseableByteBody moved = content.move();
-        Sinks.EmitResult result = sink.tryEmitNext(new RawFormField(metadata, moved));
-        if (result.isFailure()) {
+        if (!fields.tryNext(new RawFormField(metadata, moved))) {
             moved.close();
         }
     }
@@ -296,7 +295,7 @@ public final class FormDemuxer implements BufferConsumer {
         if (state instanceof StreamingContent sc) {
             sc.baseSharedBuffer.error(e);
         }
-        if (sink.tryEmitError(e).isFailure()) {
+        if (!fields.tryError(e)) {
             LOG.debug("Failed to forward failure", e);
         }
         eof();
@@ -309,7 +308,7 @@ public final class FormDemuxer implements BufferConsumer {
             }
             state = null;
             decoder.close();
-            sink.tryEmitComplete();
+            fields.tryComplete();
         }
     }
 

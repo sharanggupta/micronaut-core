@@ -31,6 +31,7 @@ import io.micronaut.http.MediaType;
 import io.micronaut.http.annotation.Part;
 import io.micronaut.http.bind.binders.PendingRequestBindingResult;
 import io.micronaut.http.body.InternalByteBody;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.form.FileUpload;
 import io.micronaut.http.form.FormCapableHttpRequest;
 import io.micronaut.http.form.FormData;
@@ -42,7 +43,6 @@ import io.micronaut.http.multipart.CompletedFileUpload;
 import io.micronaut.http.multipart.CompletedPart;
 import io.micronaut.http.multipart.RawFormField;
 import io.micronaut.http.multipart.StreamingFileUpload;
-import io.micronaut.http.reactive.execution.ReactiveExecutionFlow;
 import io.micronaut.http.server.multipart.FormFactory;
 import io.micronaut.http.server.multipart.FormRouteCompleter;
 import io.micronaut.web.router.MethodBasedRouteMatch;
@@ -52,7 +52,6 @@ import org.jspecify.annotations.Nullable;
 import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Map;
@@ -670,17 +669,20 @@ public final class FormBinding {
 
     private <T> ArgumentBinder.BindingResult<T> storeFiles(FormFactory factory, Argument<T> argument, String name, boolean all) {
         UploadContext context = UploadContext.of(factory, request);
-        Flux<FileUpload> stored = Flux.from(factory.getOrCreateCompleter(request)
-                .subscribeField(name, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_FULL, argument)))
-            // the files of a name arrive one after the other: each one is stored before the next
-            .concatMap(field -> ReactiveExecutionFlow.toPublisher(store(factory, context, field)))
-            // the files waiting behind the one being stored when the argument stops reading
-            .doOnDiscard(RawFormField.class, RawFormField::close);
-        CompletableFuture<?> value = all
-            // no file of the name leaves the argument unsatisfied, like a single file
-            ? stored.collectList().filter(files -> !files.isEmpty()).toFuture()
-            // like a CompletedFileUpload: the first file of the name, the others are discarded
-            : stored.next().toFuture();
+        // the files of a name arrive one after the other: each one is stored before the next.
+        // Like a CompletedFileUpload, a single file is the first file of the name, the others
+        // are discarded
+        ExecutionFlow<List<FileUpload>> stored = BodyPublishers.concatFlows(factory.getOrCreateCompleter(request)
+                .subscribeField(name, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_FULL, argument)),
+            (RawFormField field) -> store(factory, context, field),
+            // the files that arrive once the argument stopped reading
+            BodyPublishers::closeFormField,
+            all ? Integer.MAX_VALUE : 1);
+        CompletableFuture<?> value = stored.<Object>map(files -> all
+                // no file of the name leaves the argument unsatisfied, like a single file
+                ? (files.isEmpty() ? null : files)
+                : (files.isEmpty() ? null : files.get(0)))
+            .toCompletableFuture();
         return pending(request, value);
     }
 
@@ -700,16 +702,16 @@ public final class FormBinding {
         UploadContext context = UploadContext.of(factory, request);
         // like a StreamingFileUpload: the route runs once the part starts, and the application
         // reads its content as it arrives
-        CompletableFuture<DefaultFormPart> value = Flux.from(factory.getOrCreateCompleter(request)
-                .subscribeField(name, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)))
-            .next()
-            .map(field -> {
+        CompletableFuture<DefaultFormPart> value = BodyPublishers.first(factory.getOrCreateCompleter(request)
+                .subscribeField(name, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)), BodyPublishers::closeFormField)
+            // no part of the name leaves the flow empty
+            .flatMap(field -> {
                 DefaultFormPart part = new DefaultFormPart(new StreamingUploadContent(field, context));
                 // what the route did not read is released when the request ends
                 request.addDisposalResource(part::close);
-                return part;
+                return ExecutionFlow.just(part);
             })
-            .toFuture();
+            .toCompletableFuture();
         // like an AsyncRequestBody: a read of the part that is still running when the route
         // completed is aborted, before the response is written, or when its streamed response ended
         BasicHttpAttributes.addRouteBody(source, () -> {

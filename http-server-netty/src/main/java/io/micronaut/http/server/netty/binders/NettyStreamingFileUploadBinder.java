@@ -20,15 +20,16 @@ import io.micronaut.core.annotation.Internal;
 import io.micronaut.core.bind.annotation.Bindable;
 import io.micronaut.core.convert.ArgumentConversionContext;
 import io.micronaut.core.execution.CompletableFutureExecutionFlow;
+import io.micronaut.core.execution.ExecutionFlow;
 import io.micronaut.core.type.Argument;
 import io.micronaut.http.BasicHttpAttributes;
 import io.micronaut.http.bind.binders.PendingRequestBindingResult;
 import io.micronaut.http.bind.binders.TypedRequestArgumentBinder;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.multipart.StreamingFileUpload;
 import io.micronaut.http.server.multipart.FormFactory;
 import io.micronaut.http.server.multipart.FormRouteCompleter;
 import io.micronaut.http.server.netty.NettyHttpRequest;
-import reactor.core.publisher.Mono;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -58,9 +59,10 @@ final class NettyStreamingFileUploadBinder implements TypedRequestArgumentBinder
         String inputName = argument.getAnnotationMetadata().stringValue(Bindable.NAME).orElse(argument.getName());
 
         CompletableFuture<? extends StreamingFileUpload> completableFuture =
-            Mono.from(formFactory.get().getOrCreateCompleter(request).subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)))
-                .map(raw -> formFactory.get().streamFileUpload(raw))
-                .toFuture();
+            BodyPublishers.first(formFactory.get().getOrCreateCompleter(request).subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)), BodyPublishers::closeFormField)
+                // no field of the name leaves the flow empty
+                .flatMap(raw -> ExecutionFlow.just(formFactory.get().streamFileUpload(raw)))
+                .toCompletableFuture();
         BasicHttpAttributes.addRouteWaitsFor(request, CompletableFutureExecutionFlow.just(completableFuture));
 
         return new PendingRequestBindingResult<>() {

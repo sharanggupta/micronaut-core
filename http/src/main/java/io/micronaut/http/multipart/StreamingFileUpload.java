@@ -19,11 +19,11 @@ import io.micronaut.core.io.buffer.LeakTracker;
 import io.micronaut.core.io.buffer.ReadBuffer;
 import io.micronaut.core.util.functional.ThrowingSupplier;
 import io.micronaut.http.body.CloseableByteBody;
+import io.micronaut.http.body.stream.BodyPublishers;
 import org.jspecify.annotations.Nullable;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
-import reactor.core.publisher.Sinks;
 
 import java.io.Closeable;
 import java.io.File;
@@ -34,6 +34,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.locks.StampedLock;
 
@@ -167,7 +168,7 @@ public final class StreamingFileUpload implements Closeable {
     }
 
     private Publisher<?> transferTo(ThrowingSupplier<OutputStream, IOException> supplier) {
-        Sinks.One<Object> sink = Sinks.one();
+        CompletableFuture<@Nullable Object> transfer = new CompletableFuture<>();
         field.byteBody().toReadBufferPublisher().subscribe(new Subscriber<>() {
             // lock for subscription and outputStream. Used to make sure onSubscribe completes
             // before onError/onComplete processing.
@@ -191,7 +192,7 @@ public final class StreamingFileUpload implements Closeable {
                         success = true;
                     } catch (Exception e) {
                         s.cancel();
-                        sink.tryEmitError(e);
+                        transfer.completeExceptionally(e);
                     } finally {
                         outputLock.unlockWrite(stamp);
                     }
@@ -221,7 +222,7 @@ public final class StreamingFileUpload implements Closeable {
                             e.addSuppressed(ex);
                         }
                         Objects.requireNonNull(subscription).cancel();
-                        sink.tryEmitError(e);
+                        transfer.completeExceptionally(e);
                     } finally {
                         outputLock.unlock(stamp);
                     }
@@ -242,7 +243,7 @@ public final class StreamingFileUpload implements Closeable {
                     } finally {
                         outputLock.unlockWrite(stamp);
                     }
-                    sink.tryEmitError(t);
+                    transfer.completeExceptionally(t);
                 });
             }
 
@@ -252,9 +253,9 @@ public final class StreamingFileUpload implements Closeable {
                     long stamp = outputLock.writeLock();
                     try {
                         Objects.requireNonNull(outputStream).close();
-                        sink.tryEmitEmpty();
+                        transfer.complete(null);
                     } catch (IOException ex) {
-                        sink.tryEmitError(ex);
+                        transfer.completeExceptionally(ex);
                     } finally {
                         outputLock.unlockWrite(stamp);
                     }
@@ -262,7 +263,7 @@ public final class StreamingFileUpload implements Closeable {
             }
         });
         close();
-        return sink.asMono();
+        return BodyPublishers.fromStage(transfer);
     }
 
     /**

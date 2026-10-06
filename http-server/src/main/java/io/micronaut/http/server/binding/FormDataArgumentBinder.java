@@ -26,22 +26,19 @@ import io.micronaut.http.bind.binders.PendingRequestBindingResult;
 import io.micronaut.http.bind.binders.TypedRequestArgumentBinder;
 import io.micronaut.http.body.CloseableAvailableByteBody;
 import io.micronaut.http.body.InternalByteBody;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.exceptions.ContentLengthExceededException;
 import io.micronaut.http.form.FileUpload;
 import io.micronaut.http.form.FormCapableHttpRequest;
 import io.micronaut.http.form.FormData;
 import io.micronaut.http.multipart.CompletedFileUpload;
 import io.micronaut.http.multipart.RawFormField;
-import io.micronaut.http.reactive.execution.ReactiveExecutionFlow;
 import io.micronaut.http.server.multipart.FormFactory;
 import jakarta.inject.Singleton;
 import org.jspecify.annotations.Nullable;
 import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.Disposable;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.nio.charset.Charset;
 import java.util.ArrayList;
@@ -154,19 +151,33 @@ final class FormDataArgumentBinder implements TypedRequestArgumentBinder<FormDat
         // needs, which fails the form, and releases the files stored after it ended
         request.addDisposalResource(() -> {
             owned.close();
-            // disposing of the reading completes neither callback of the subscription
+            // stopping the reading completes the flow of the fields with neither a value nor a failure
             result.completeExceptionally(new CancellationException("The request ended before its form was read completely"));
         });
-        // the parts of a form arrive in order: each one is read or stored before the next
-        Disposable subscription = Flux.from(source)
-            .concatMap(field -> Flux.from(ReactiveExecutionFlow.toPublisher(complete(factory, uploadContext, request, field, collected))))
-            // the fields waiting behind the one being read when the reading stops: the request
-            // ended, the handler did not wait for the form, or the body failed
-            .doOnDiscard(RawFormField.class, RawFormField::close)
-            .then(Mono.fromSupplier(() -> form(collected.fields(), collected.files(), conversionService)))
-            .subscribe(result::complete, result::completeExceptionally);
-        owned.reading(subscription);
-        return new Collection(result, subscription);
+        // the parts of a form arrive in order: each one is read or stored before the next. The
+        // fields that arrive once the reading stopped are closed: the request ended, the handler
+        // did not wait for the form, or the body failed
+        ExecutionFlow<List<Boolean>> reading = BodyPublishers.concatFlows(source,
+            (RawFormField field) -> complete(factory, uploadContext, request, field, collected),
+            BodyPublishers::closeFormField,
+            Integer.MAX_VALUE);
+        reading.onComplete((ignored, error) -> {
+            if (error != null) {
+                result.completeExceptionally(error);
+                return;
+            }
+            FormData form;
+            try {
+                form = form(collected.fields(), collected.files(), conversionService);
+            } catch (Throwable e) {
+                result.completeExceptionally(e);
+                return;
+            }
+            result.complete(form);
+        });
+        Runnable stop = reading::cancel;
+        owned.reading(stop);
+        return new Collection(result, stop);
     }
 
     private static FormData form(Map<String, List<String>> fields, Map<String, List<FileUpload>> files, ConversionService conversionService) {
@@ -239,9 +250,9 @@ final class FormDataArgumentBinder implements TypedRequestArgumentBinder<FormDat
      * A collection of a form that is running, or completed.
      *
      * @param result       Completes with the form
-     * @param subscription The subscription to the fields of the form
+     * @param stop   Stops reading the fields of the form
      */
-    record Collection(CompletableFuture<FormData> result, Disposable subscription) {
+    record Collection(CompletableFuture<FormData> result, Runnable stop) {
 
         /**
          * Stop reading the form, if it was not completely read: the rest of the body is
@@ -251,7 +262,7 @@ final class FormDataArgumentBinder implements TypedRequestArgumentBinder<FormDat
             if (result.isDone()) {
                 return;
             }
-            subscription.dispose();
+            stop.run();
             result.completeExceptionally(new CancellationException("The form was not read completely before the handler completed"));
         }
     }
@@ -263,7 +274,7 @@ final class FormDataArgumentBinder implements TypedRequestArgumentBinder<FormDat
         // guarded by this
         private final List<FileUpload> uploads = new ArrayList<>();
         private boolean closed;
-        private @Nullable Disposable reading;
+        private @Nullable Runnable reading;
 
         synchronized boolean add(FileUpload upload) {
             if (closed) {
@@ -273,31 +284,31 @@ final class FormDataArgumentBinder implements TypedRequestArgumentBinder<FormDat
             return true;
         }
 
-        void reading(Disposable subscription) {
-            boolean dispose;
+        void reading(Runnable stop) {
+            boolean stopNow;
             synchronized (this) {
-                dispose = closed;
-                reading = subscription;
+                stopNow = closed;
+                reading = stop;
             }
-            if (dispose) {
-                subscription.dispose();
+            if (stopNow) {
+                stop.run();
             }
         }
 
         void close() {
             List<FileUpload> owned;
-            Disposable subscription;
+            Runnable stop;
             synchronized (this) {
                 if (closed) {
                     return;
                 }
                 closed = true;
                 owned = List.copyOf(uploads);
-                subscription = reading;
+                stop = reading;
             }
-            if (subscription != null) {
+            if (stop != null) {
                 // a form the request no longer needs: nothing to do once it was read
-                subscription.dispose();
+                stop.run();
             }
             if (!owned.isEmpty()) {
                 release(owned);

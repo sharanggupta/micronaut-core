@@ -25,12 +25,11 @@ import io.micronaut.core.type.Argument;
 import io.micronaut.http.BasicHttpAttributes;
 import io.micronaut.http.bind.binders.PendingRequestBindingResult;
 import io.micronaut.http.bind.binders.TypedRequestArgumentBinder;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.multipart.CompletedFileUpload;
-import io.micronaut.http.reactive.execution.ReactiveExecutionFlow;
 import io.micronaut.http.server.multipart.FormFactory;
 import io.micronaut.http.server.multipart.FormRouteCompleter;
 import io.micronaut.http.server.netty.NettyHttpRequest;
-import reactor.core.publisher.Mono;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -64,9 +63,9 @@ final class NettyCompletedFileUploadBinder implements TypedRequestArgumentBinder
 
         FormRouteCompleter frc = formFactory.get().getOrCreateCompleter(request);
         // we implicitly just use the first field of this name.
-        CompletableFuture<CompletedFileUpload> completableFuture = Mono.from(frc.subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_FULL, argument)))
-            .flatMap(raw -> Mono.from(ReactiveExecutionFlow.toPublisher(formFactory.get().completeFileUpload(request, raw))))
-            .toFuture();
+        CompletableFuture<CompletedFileUpload> completableFuture = BodyPublishers.first(frc.subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_FULL, argument)), BodyPublishers::closeFormField)
+            .flatMap(raw -> formFactory.get().completeFileUpload(request, raw))
+            .toCompletableFuture();
 
         BasicHttpAttributes.addRouteWaitsFor(request, CompletableFutureExecutionFlow.just(completableFuture).onErrorResume(t -> ExecutionFlow.empty()));
 

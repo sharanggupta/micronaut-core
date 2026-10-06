@@ -25,12 +25,12 @@ import io.micronaut.http.BasicHttpAttributes;
 import io.micronaut.http.HttpRequest;
 import io.micronaut.http.bind.binders.PendingRequestBindingResult;
 import io.micronaut.http.bind.binders.TypedRequestArgumentBinder;
+import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.form.FormCapableHttpRequest;
 import io.micronaut.http.multipart.RawFormField;
 import io.micronaut.http.server.multipart.FormFactory;
 import io.micronaut.http.server.multipart.FormRouteCompleter;
 import jakarta.inject.Singleton;
-import reactor.core.publisher.Mono;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -66,9 +66,9 @@ public final class RawFormFieldArgumentBinder implements TypedRequestArgumentBin
         Argument<RawFormField> argument = context.getArgument();
         String inputName = argument.getAnnotationMetadata().stringValue(Bindable.NAME).orElse(argument.getName());
 
-        CompletableFuture<RawFormField> future = Mono.from(formFactory.get().getOrCreateCompleter(fchr)
-                .subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)))
-            .toFuture();
+        CompletableFuture<RawFormField> future = BodyPublishers.first(formFactory.get().getOrCreateCompleter(fchr)
+                .subscribeField(inputName, new FormRouteCompleter.SubscriptionMetadata(FormRouteCompleter.SubscriptionMode.WAITS_FOR_START, argument)), BodyPublishers::closeFormField)
+            .toCompletableFuture();
 
         BasicHttpAttributes.addRouteWaitsFor(source, CompletableFutureExecutionFlow.just(future));
 
