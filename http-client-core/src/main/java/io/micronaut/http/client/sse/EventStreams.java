@@ -86,6 +86,7 @@ public final class EventStreams {
      * @param <B>             The event data type
      * @return The response, whose body is the events
      */
+    @SuppressWarnings("java:S2095") // the elements own the event reader, and close it
     public static <B> HttpResponse<BodyElements<Event<B>>> response(ByteBodyHttpResponse<?> response,
                                                                    MessageBodyHandlerRegistry handlerRegistry,
                                                                    Argument<B> eventType,
