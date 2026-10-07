@@ -4561,6 +4561,16 @@ public class PythonStubGenerator implements TypeElementVisitor<Object, Object> {
                         ));
                     } else {
                         arguments.addAll(methodParameters);
+                        if (methodElement instanceof PythonMethodElement pythonMethod) {
+                            // a parameter injected with a bean: the bean injected into the module attribute the
+                            // processor declares, read from the module
+                            ExpressionDef classReference = arguments.getFirst();
+                            for (PythonMethodElement.InjectedArgument injected : pythonMethod.injectedArguments()) {
+                                int index = Math.min(2 + injected.position(), arguments.size());
+                                arguments.add(index, PYTHON_CONTEXT_RUNTIME.invokeStatic(
+                                    "getStaticAttribute", POLYGLOT_VALUE, classReference, ExpressionDef.constant(injected.attribute())));
+                            }
+                        }
                     }
                     invokedValue = PYTHON_CONTEXT_RUNTIME.invokeStatic(
                         "invokeStaticMethod",
@@ -4585,6 +4595,15 @@ public class PythonStubGenerator implements TypeElementVisitor<Object, Object> {
                             variadicArguments = variadic.getFirst();
                         } else {
                             coerceParameterToPolyglotValue(parameter, parameterExpressions, methodParameter, targetContext);
+                        }
+                    }
+                    if (methodElement instanceof PythonMethodElement pythonMethod) {
+                        // a parameter injected with a bean (ctx: ApplicationContext = Inject()) is not an argument of
+                        // the Java method: the bean is the one injected into the attribute the processor declares
+                        int argumentsStart = receiverOffset == 1 ? 1 : 0;
+                        for (PythonMethodElement.InjectedArgument injected : pythonMethod.injectedArguments()) {
+                            int index = Math.min(argumentsStart + injected.position(), parameterExpressions.size());
+                            parameterExpressions.add(index, targetValue.invoke(GET_MEMBER, POLYGLOT_VALUE, ExpressionDef.constant(injected.attribute())));
                         }
                     }
                     ExpressionDef pythonArguments = TypeDef.OBJECT.array().instantiate(parameterExpressions);
@@ -5370,7 +5389,7 @@ public class PythonStubGenerator implements TypeElementVisitor<Object, Object> {
         return "is" + NameUtils.capitalize(name);
     }
 
-    private static String beanSetterName(String name) {
+    static String beanSetterName(String name) {
         return "set" + NameUtils.capitalize(name);
     }
 
@@ -5933,12 +5952,13 @@ public class PythonStubGenerator implements TypeElementVisitor<Object, Object> {
                     } else if (returnType.isAssignable(HTTP_RESPONSE)) {
                         ClassElement bodyType = returnType.getFirstTypeArgument().orElse(null);
                         if (bodyType == null || Object.class.getName().equals(bodyType.getName())) {
-                            yield uncheckedCast(PYTHON_HTTP_CONVERSION.invokeStatic("convertHttpResponse", ClassTypeDef.OBJECT,
-                                    invokedValue, CLASS_OBJECT), returnType);
+                            yield PYTHON_HTTP_CONVERSION.invokeStatic("convertHttpResponse", ClassTypeDef.OBJECT,
+                                    invokedValue, CLASS_OBJECT)
+                                .cast(ClassTypeDef.of(returnType));
                         }
-                        // The body class is erased, so a nested generic body type is cast unchecked
-                        yield uncheckedCast(PYTHON_HTTP_CONVERSION.invokeStatic("convertHttpResponse", ClassTypeDef.OBJECT,
-                                invokedValue, toClassExpression(bodyType)), returnType);
+                        yield PYTHON_HTTP_CONVERSION.invokeStatic("convertHttpResponse", ClassTypeDef.OBJECT,
+                                invokedValue, toClassExpression(bodyType))
+                            .cast(ClassTypeDef.of(returnType));
                     } else {
                         if (isGeneratedWrapperType(allClasses, returnType)) {
                             yield javaClassType(returnType)

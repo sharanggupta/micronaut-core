@@ -183,6 +183,10 @@ public final class PythonTypeResolver {
         if (metadata.isEmpty()) {
             return baseType;
         }
+        if (baseType instanceof PrimitiveElement primitiveElement) {
+            // A type annotation on a primitive, such as Annotated[int, ...]: an annotated copy of the shared constant
+            return primitiveElement.withTypeAnnotationMetadata(metadata);
+        }
         return TypeAnnotatedClassElement.of(baseType, metadata);
     }
 

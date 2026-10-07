@@ -707,11 +707,13 @@ public final class PythonContextRuntime {
     }
 
     static boolean shouldOffloadPooledExecution() {
+        if (!Thread.currentThread().isVirtual()) {
+            return false;
+        }
         BeanProvider<ExecutorService> provider = pooledExecutorServiceProvider();
         return provider != null
             && provider.isResolvable()
-            && PythonAsyncioRuntime.currentEventLoopForContext() == null
-            && Thread.currentThread().isVirtual();
+            && PythonAsyncioRuntime.currentEventLoopForContext() == null;
     }
 
     static <T> T offloadPooledExecution(Supplier<T> action) {
@@ -927,6 +929,21 @@ public final class PythonContextRuntime {
      * @param args Arguments
      * @return The polyglot result
      */
+    /**
+     * An attribute of a pooled module: the bean injected for a parameter of a module function
+     * ({@code ctx: ApplicationContext = Inject()}), which the generated bridge passes to the function.
+     *
+     * @param packageName The package name
+     * @param scriptName  The module name
+     * @param name        The attribute name
+     * @return The attribute value
+     * @since 5.3.0
+     */
+    @UsedByGeneratedCode
+    public static Value pooledScriptAttribute(String packageName, String scriptName, String name) {
+        return withPooledScript(packageName, scriptName, module -> module.getMember(name));
+    }
+
     @UsedByGeneratedCode
     public static Value invokePooledScript(String packageName, String scriptName, String methodName, Object... args) {
         return withPooledScript(packageName, scriptName, v -> v.getMember(methodName).execute(
@@ -961,10 +978,28 @@ public final class PythonContextRuntime {
         // generated code reaches this outside any bridge call: the work is an execution of the context
         return PythonContextRegistry.withExecutionFrame(context, () -> {
             Value pythonClass = findClass(classReference, context);
-            // stubs the abstract methods once per class and context; the marker it sets makes later calls a no-op
-            helper(context, PREPARE_INTRODUCTION).execute(pythonClass);
+            prepareIntroductionClass(classReference, pythonClass);
             return instantiate(classReference, args, pythonClass);
         });
+    }
+
+    /**
+     * Prepare an introduction class once per context, within its execution frame.
+     *
+     * @param classReference The stable class reference
+     * @param pythonClass The resolved class in the executing context
+     */
+    @Internal
+    public static void prepareIntroductionClass(PythonClassReference classReference, Value pythonClass) {
+        Context context = pythonClass.getContext();
+        PythonContextRegistry.ContextState state = PythonContextRegistry.state(context);
+        String key = classReference.cacheKey();
+        if (!state.preparedIntroductionClasses.contains(key)) {
+            // As in helper(), execute Python outside map monitors. The guest helper is idempotent.
+            helper(context, PREPARE_INTRODUCTION).executeVoid(pythonClass);
+            // A failed preparation must remain retryable.
+            state.preparedIntroductionClasses.add(key);
+        }
     }
 
     /**
@@ -1135,10 +1170,8 @@ public final class PythonContextRuntime {
      */
     @UsedByGeneratedCode
     public static Value newUninitializedInstance(Context context, PythonClassReference classReference) {
-        return PythonContextRegistry.withExecutionFrame(context, () -> {
-            Value pythonClass = findClass(classReference, context);
-            return uninitializedInstanceFactory(context).execute(pythonClass);
-        });
+        return PythonContextRegistry.withExecutionFrame(context,
+            () -> uninitializedInstanceFactory(context, classReference).execute());
     }
 
     /**
@@ -1222,14 +1255,11 @@ public final class PythonContextRuntime {
     public static Value newFrozenDataclassInstance(Context context,
                                                    PythonClassReference classReference,
                                                    @Nullable Map<String, Object> props) {
-        return PythonContextRegistry.withExecutionFrame(context, () -> {
-            Value pythonClass = findClass(classReference, context);
-            return withContextClassLoader(() -> {
-                Value instance = uninitializedInstanceFactory(pythonClass.getContext()).execute(pythonClass);
-                populateProperties(instance, props);
-                return instance;
-            });
-        });
+        return PythonContextRegistry.withExecutionFrame(context, () -> withContextClassLoader(() -> {
+            Value instance = uninitializedInstanceFactory(context, classReference).execute();
+            populateProperties(instance, props);
+            return instance;
+        }));
     }
 
     private static void populateProperties(Value instance, @Nullable Map<String, Object> props) {
@@ -1262,8 +1292,23 @@ public final class PythonContextRuntime {
         );
     }
 
-    private static Value uninitializedInstanceFactory(Context context) {
-        return helper(context, NEW_UNINITIALIZED_INSTANCE);
+    private static Value uninitializedInstanceFactory(Context context, PythonClassReference classReference) {
+        PythonContextRegistry.ContextState state = PythonContextRegistry.state(context);
+        String key = classReference.cacheKey();
+        Value factory = state.uninitializedInstanceFactories.get(key);
+        if (factory == null) {
+            // Binding the class once lets subsequent allocations execute without arguments.
+            // Passing a Python class to execute on every allocation makes GraalPy probe it for
+            // special positional/keyword argument markers, raising internal AttributeErrors.
+            // As in getOrCreateValue, bind outside map monitors to preserve GIL lock ordering.
+            factory = helper(context, NEW_UNINITIALIZED_INSTANCE)
+                .invokeMember("__get__", findClass(classReference, context));
+            Value existing = state.uninitializedInstanceFactories.putIfAbsent(key, factory);
+            if (existing != null) {
+                factory = existing;
+            }
+        }
+        return factory;
     }
 
     private static Value propertySetter(Context context) {
@@ -1423,6 +1468,21 @@ public final class PythonContextRuntime {
         } else {
             throw new InstantiationException("Cannot find Python module: " + packageName);
         }
+    }
+
+    /**
+     * An attribute of the module or class a generated class stands for, such as the bean injected for a parameter of a
+     * module function ({@code ctx: ApplicationContext = Inject()}).
+     *
+     * @param classReference The class reference
+     * @param name           The attribute name
+     * @return The attribute value
+     * @since 5.3.0
+     */
+    @UsedByGeneratedCode
+    public static Value getStaticAttribute(PythonClassReference classReference, String name) {
+        Context ctx = getContext();
+        return PythonContextRegistry.withExecutionFrame(ctx, () -> findClass(classReference, ctx).getMember(name));
     }
 
     /**
