@@ -1246,7 +1246,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
             return streamed.publisher();
         }
         // e.g. the empty body of a response without one
-        return new BodyElementsPublisher<>(pieces);
+        return publisher(pieces);
     }
 
     /**
@@ -1374,7 +1374,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         return Flux.defer(() -> toMono(exchangeEventStreamFlow(request, eventType, errorType), propagatedContext)
             .flatMapMany(response -> {
                 BodyElements<Event<B>> events = Objects.requireNonNull(response.body(), "The response has no events");
-                return Flux.from(new BodyElementsPublisher<>(events))
+                return Flux.from(publisher(events))
                     .map(event -> (HttpResponse<Event<B>>) new ElementResponse<>(response, event))
                     // without an event, the status and the headers of the response are still of interest
                     .switchIfEmpty(Mono.fromSupplier(() -> new ElementResponse<>(response, null)));
@@ -1464,7 +1464,19 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
     private static <T> Publisher<T> elements(Supplier<ExecutionFlow<HttpResponse<BodyElements<T>>>> exchange) {
         PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
         return Flux.defer(() -> toMono(exchange.get(), propagatedContext)
-            .flatMapMany(response -> Flux.from(new BodyElementsPublisher<>(Objects.requireNonNull(response.body(), "The response has no elements")))));
+            .flatMapMany(response -> Flux.from(publisher(Objects.requireNonNull(response.body(), "The response has no elements")))));
+    }
+
+    /**
+     * @param elements The elements of a response body
+     * @param <T>      The element type
+     * @return The elements as a publisher: pushed by the piece reader where the elements are read
+     * from the body, else pulled one at a time
+     */
+    private static <T> Publisher<T> publisher(BodyElements<T> elements) {
+        return elements instanceof ByteBodyElements<T> byteBody
+            ? byteBody.toPublisher()
+            : new BodyElementsPublisher<>(elements);
     }
 
     // ---- flows
