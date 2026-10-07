@@ -50,6 +50,7 @@ public final class BodyPieces implements PieceReader<ByteBuffer<?>> {
      * @param body The body, which the elements take over
      * @return The pieces of the body
      */
+    @SuppressWarnings("java:S2095") // the elements own the piece reader, and close it
     public static BodyElements<ByteBuffer<?>> elements(CloseableByteBody body) {
         return new ByteBodyElements<>(body, new BodyPieces(), BodyPieces::wrap);
     }
@@ -183,7 +184,7 @@ public final class BodyPieces implements PieceReader<ByteBuffer<?>> {
                 return;
             }
             if (length > pending.length) {
-                pending = Arrays.copyOf(pending, (int) Math.min(Math.max(length, (long) pending.length * 2), Integer.MAX_VALUE - 8));
+                pending = Arrays.copyOf(pending, (int) Math.min(Math.max(length, (long) pending.length * 2), Integer.MAX_VALUE - 8L));
             }
             System.arraycopy(bytes, from, pending, pendingLength, count);
             pendingLength = (int) length;
