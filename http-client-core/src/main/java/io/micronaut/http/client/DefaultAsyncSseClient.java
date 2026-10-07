@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.micronaut.http.client.netty;
+package io.micronaut.http.client;
 
 import io.micronaut.core.annotation.Internal;
 import io.micronaut.core.type.Argument;
@@ -26,7 +26,7 @@ import io.micronaut.http.sse.Event;
 import java.util.concurrent.CompletionStage;
 
 /**
- * Default implementation of {@link AsyncSseClient} backed by {@link NettyHttpClient}, without
+ * Default implementation of {@link AsyncSseClient} backed by {@link AbstractHttpClient}, without
  * Reactor. Cancelling the future of an exchange before the response arrived cancels the
  * exchange, and closes the events of a response that arrives anyway.
  *
@@ -36,22 +36,22 @@ import java.util.concurrent.CompletionStage;
 @Internal
 final class DefaultAsyncSseClient implements AsyncSseClient {
 
-    private final NettyHttpClient nettyHttpClient;
+    private final AbstractHttpClient<?> client;
 
     /**
-     * @param nettyHttpClient The delegate client
+     * @param client The delegate client
      */
-    DefaultAsyncSseClient(NettyHttpClient nettyHttpClient) {
-        this.nettyHttpClient = nettyHttpClient;
+    DefaultAsyncSseClient(AbstractHttpClient<?> client) {
+        this.client = client;
     }
 
     @Override
     public <I, B> CompletionStage<HttpResponse<BodyElements<Event<B>>>> exchangeEventStream(HttpRequest<I> request, Argument<B> eventType, Argument<?> errorType) {
-        return ElementsFutures.response(nettyHttpClient.exchangeEventStreamFlow(request, eventType, errorType));
+        return ElementsFutures.response(client.exchangeEventStreamFlow(request, eventType, errorType));
     }
 
     @Override
     public void close() {
-        nettyHttpClient.close();
+        client.close();
     }
 }
