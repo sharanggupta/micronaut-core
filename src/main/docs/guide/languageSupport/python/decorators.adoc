@@ -78,39 +78,34 @@ Constraint options also include `message`, `groups`, and `payload`. Regular expr
 
 Use `"valid": True` for cascaded validation of an introspected nested object; `valid` has no constraint options. Unknown constraint names, unknown options, missing required options, and malformed recognized validation metadata are compilation errors. Other metadata namespaces are left alone. Method parameters continue to use `Annotated[...]` metadata.
 
-== Dataclass Persistence Metadata
+== Dataclass Persistence
 
-With Micronaut Data configured, a dataclass can declare its identity using standard-library field metadata:
+With Micronaut Data configured, a dataclass declares its identity using the existing typed Pyronaut annotations in `Annotated[...]`:
 
 [source,python]
 ----
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Annotated
+from pyronaut import data
 
 @dataclass
 class Fruit:
     name: str
-    id: int | None = field(
-        default=None,
-        metadata={"data": {"id": True, "generated_value": True}},
-    )
+    id: Annotated[int | None, data.Id, data.GeneratedValue] = None
 ----
 
-Enabled `data` metadata opts the dataclass into the existing Micronaut Data entity mapping. The compiler translates `id` to `Id` and `generated_value` to `GeneratedValue`; the existing Data processors provide identity indexes and repository behavior. There is no second persistence engine.
+An explicit `data.Id` or `data.GeneratedValue` field annotation opts the dataclass into Micronaut Data entity mapping. The existing Data processors provide identity indexes and repository behavior. A field named `id` alone, validation annotations, and unrelated dataclass field metadata do not opt a class into persistence.
 
-`id` accepts `True` or `False`. `generated_value` accepts `True` for Data's default `AUTO` strategy, `False` to disable it, or a dictionary with the existing `value`, `definition`, and `ref` options. `value` is one of `"AUTO"`, `"SEQUENCE"`, `"IDENTITY"`, or `"UUID"`; `definition` and `ref` are strings. For example:
+Use `data.GeneratedValue` for Data's default `AUTO` strategy, or call the annotation to supply its existing `value`, `definition`, and `ref` members. For example:
 
 [source,python]
 ----
-id: int | None = field(default=None, metadata={
-    "data": {"id": True, "generated_value": {"value": "IDENTITY"}},
-})
+id: Annotated[int | None, data.Id, data.GeneratedValue(data.GeneratedValue.Type.IDENTITY)] = None
 ----
 
-Generation strategy, property type and database support must agree, just as with the corresponding Data annotations. A generated value does not implicitly mark a field as the identity. Explicit entity annotations and composed stereotypes retain their configuration; an explicit introspection configuration also remains unchanged.
+Generation strategy, property type and database support must agree. A generated value does not implicitly mark a field as the identity. Bare and called annotations, import aliases, and existing composed stereotypes use the same annotation parser. Explicit `@data.MappedEntity(...)` and introspection configuration retain their customization.
 
-Plain dataclasses, validation-only metadata, empty `data` dictionaries, and all-disabled directives remain unmapped. A field named `id` is not itself a persistence opt-in. Defaults, nullable identities, and `default_factory` retain their Python meaning. Validation and data dictionaries may coexist in the same field metadata.
-
-Only literal dictionaries and supported compile-time string constants are interpreted. Unknown keys, unknown generation strategies, duplicate recognized keys and malformed recognized data metadata are compilation errors. Other metadata namespaces are ignored. Persistence metadata does not enable JSON serialization of ordinary dataclasses; serialization remains an explicit, separate choice.
+Defaults, nullable identities, and `field(default_factory=...)` retain their Python meaning. Persistence annotations do not enable JSON serialization of ordinary dataclasses; serialization remains an explicit, separate choice.
 
 == Custom Annotations
 

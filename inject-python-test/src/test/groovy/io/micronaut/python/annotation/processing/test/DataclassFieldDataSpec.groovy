@@ -37,15 +37,17 @@ class DataclassFieldDataSpec extends AbstractPythonTypeElementSpec {
     @TempDir
     File classesDirectory
 
-    void "stdlib data metadata emits existing Micronaut Data annotations"() {
+    void "Annotated identity infers existing Micronaut Data entity mapping"() {
         given:
         def context = buildContext('''
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Annotated
+from micronaut.data.annotation import Id, GeneratedValue
 
 @dataclass
 class Fruit:
     name: str
-    id: int | None = field(default=None, metadata={"data": {"id": True, "generated_value": True}})
+    id: Annotated[int | None, Id, GeneratedValue] = None
 ''')
         def introspection = getBeanIntrospection(context, "python.Fruit")
         def id = introspection.getRequiredProperty("id", Integer)
@@ -65,11 +67,14 @@ class Fruit:
         def context = buildContext('''
 import dataclasses as dc
 from dataclasses import field as f
+from typing import Annotated
+from micronaut.data.annotation import Id as Identity, GeneratedValue
+from jakarta.validation.constraints import NotBlank
 
 @dc.dataclass
 class Fruit:
-    name: str = f(metadata={"validation": {"not_blank": True}})
-    id: int | None = dc.field(default=None, metadata={"data": {"id": True, "generated_value": True}})
+    name: Annotated[str, NotBlank] = f()
+    id: Annotated[int | None, Identity(), GeneratedValue()] = dc.field(default=None)
 ''', true)
         def introspection = getBeanIntrospection(context, "python.Fruit")
         def entity = new RuntimePersistentEntity(introspection)
@@ -95,15 +100,17 @@ class Fruit:
         context?.close()
     }
 
-    void "generation strategy and existing member options survive canonical metadata (#strategy)"() {
+    void "generation strategy and existing Annotated member options survive (#strategy)"() {
         given:
         def context = buildContext("""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Annotated
+import micronaut.data.annotation as data
 
 @dataclass
 class Fruit:
-    id: int | None = field(default=None, metadata={"data": {"id": True, "generated_value": {
-        "value": "$strategy", "definition": "CREATE SEQUENCE fruit_seq", "ref": "fruit_seq"}}})
+    id: Annotated[int | None, data.Id, data.GeneratedValue(
+        value=data.GeneratedValue.Type.$strategy, definition="CREATE SEQUENCE fruit_seq", ref="fruit_seq")] = None
 """)
         def id = getBeanIntrospection(context, "python.Fruit").getRequiredProperty("id", Integer)
 
@@ -123,14 +130,16 @@ class Fruit:
         given:
         def context = buildContext('''
 from dataclasses import dataclass, field
-from micronaut.data.annotation import MappedEntity
+from typing import Annotated
+from micronaut.data.annotation import Id, GeneratedValue, MappedEntity
 from micronaut.core.annotation import Introspected
+from jakarta.validation.constraints import NotBlank
 
 @MappedEntity("fruit_rows")
 @Introspected(excludes=["secret"])
 @dataclass
 class Configured:
-    id: int | None = field(default=None, metadata={"data": {"id": True}})
+    id: Annotated[int | None, Id] = None
     secret: str = "hidden"
     tags: list[str] = field(default_factory=list)
 
@@ -143,7 +152,21 @@ def Entity():
 @Entity
 @dataclass
 class Composed:
-    id: int = field(metadata={"data": {"id": True}})
+    id: Annotated[int, Id]
+
+@Id
+def PrimaryKey():
+    def decorator(target):
+        return target
+    return decorator
+
+@dataclass
+class ComposedIdentity:
+    id: Annotated[int, PrimaryKey]
+
+@dataclass
+class GeneratedOnly:
+    value: Annotated[int, GeneratedValue]
 
 @dataclass
 class Plain:
@@ -151,15 +174,15 @@ class Plain:
 
 @dataclass
 class Validated:
-    name: str = field(metadata={"validation": {"not_blank": True}})
+    name: Annotated[str, NotBlank]
 
 @dataclass
-class Disabled:
-    id: int = field(metadata={"data": {"id": False, "generated_value": False}})
+class Metadata:
+    id: int = field(metadata={"data": {"id": True, "generated_value": True}, "third_party": object()})
 
 @dataclass
-class Empty:
-    id: int = field(metadata={"data": {}, "third_party": object()})
+class Unrelated:
+    id: int = field(metadata={"data": None})
 ''')
         def configured = getBeanIntrospection(context, "python.Configured")
 
@@ -170,7 +193,11 @@ class Empty:
         getBeanIntrospection(context, "python.Composed").annotationMetadata.hasStereotype(MappedEntity)
         !getBeanIntrospection(context, "python.Composed").hasAnnotation(MappedEntity)
         getBeanIntrospection(context, "python.Composed").stringValue(MappedEntity).get() == "composed_rows"
-        ["Plain", "Validated", "Disabled", "Empty"].every {
+        getBeanIntrospection(context, "python.ComposedIdentity").annotationMetadata.hasAnnotation(MappedEntity)
+        getBeanIntrospection(context, "python.ComposedIdentity").getIndexedProperty(Id).get().name == "id"
+        getBeanIntrospection(context, "python.GeneratedOnly").annotationMetadata.hasAnnotation(MappedEntity)
+        !getBeanIntrospection(context, "python.GeneratedOnly").getRequiredProperty("value", Integer).hasAnnotation(Id)
+        ["Plain", "Validated", "Metadata", "Unrelated"].every {
             !getBeanIntrospection(context, "python.$it").hasAnnotation(MappedEntity)
         }
 
@@ -194,14 +221,16 @@ class Empty:
         PythonContextRuntime.resetContext()
         def compiler = PyronautCompiler.builder().pythonCode('''
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Annotated
+from micronaut.data.annotation import Id, GeneratedValue
 from micronaut.data.jdbc.annotation import JdbcRepository
 from micronaut.data.repository import CrudRepository
 
 @dataclass
 class Fruit:
     name: str
-    id: int | None = field(default=None, metadata={"data": {"id": True, "generated_value": True}})
+    id: Annotated[int | None, Id, GeneratedValue] = None
 
 @JdbcRepository(dialect="H2")
 class FruitRepository(CrudRepository[Fruit, int], ABC):

@@ -720,7 +720,6 @@ class MicronautAstVisitor(ast.NodeVisitor):
         previous_class_properties = self.current_class_properties
         previous_nested_types = self.current_class_nested_types
         previous_last_attribute = self.last_attribute
-        previous_data_metadata = getattr(self, "current_class_data_metadata", False)
 
         try:
             self.current_class_nested_types = nested_types
@@ -765,7 +764,6 @@ class MicronautAstVisitor(ast.NodeVisitor):
             self.current_class_attributes = []
             self.current_class_properties = {}
             self.last_attribute = None
-            self.current_class_data_metadata = False
 
             # Check if this is an enum class
             is_enum = self._is_enum_class(node)
@@ -784,7 +782,10 @@ class MicronautAstVisitor(ast.NodeVisitor):
                     # with the default introspection inferred for an ordinary dataclass.
                     decorators = list(self.current_class.decorators())
                     mapped_entity = "io.micronaut.data.annotation.MappedEntity"
-                    if self.current_class_data_metadata and not self._has_stereotype(decorators, mapped_entity):
+                    if (any(self._has_stereotype(attr.decorators(), marker)
+                            for attr in self.current_class_attributes
+                            for marker in ("io.micronaut.data.annotation.Id", "io.micronaut.data.annotation.GeneratedValue"))
+                            and not self._has_stereotype(decorators, mapped_entity)):
                         decorators.append(DecoratorDef("MappedEntity", mapped_entity, None, {}, []))
                     if not self._has_introspection(decorators) and not self._has_stereotype(decorators, mapped_entity):
                         decorators.append(DecoratorDef("Introspected", "io.micronaut.core.annotation.Introspected", None, {}, []))
@@ -864,7 +865,6 @@ class MicronautAstVisitor(ast.NodeVisitor):
             self.current_class_properties = previous_class_properties
             self.current_class_nested_types = previous_nested_types
             self.last_attribute = previous_last_attribute
-            self.current_class_data_metadata = previous_data_metadata
 
     def _has_introspection(self, decorators):
         return self._has_stereotype(decorators, "io.micronaut.core.annotation.Introspected")
@@ -980,9 +980,6 @@ class MicronautAstVisitor(ast.NodeVisitor):
                     default_factory_name = self._callable_name(factory) if factory is not None else None
                     try:
                         decorators.extend(self._dataclass_field_validation(keywords.get("metadata")))
-                        data_decorators = self._dataclass_field_data(keywords.get("metadata"))
-                        decorators.extend(data_decorators)
-                        self.current_class_data_metadata |= bool(data_decorators)
                     except ValueError as error:
                         self.unresolved_member_errors.append(str(error))
                 attr_def = JavaAttributeDef(attr_name, annotation, type_name, value, has_default, decorators, None, is_static, None, default_factory_name)
@@ -1015,53 +1012,6 @@ class MicronautAstVisitor(ast.NodeVisitor):
         if isinstance(value, (set, frozenset)):
             return TypeRef("set")
         return TypeRef("object")
-
-    def _dataclass_field_data(self, metadata):
-        metadata = self._field_metadata_literal(metadata)
-        if not isinstance(metadata, ast.Dict):
-            return []
-        decorators = []
-        seen_data = False
-        for namespace, data in self._field_metadata_entries(metadata):
-            if not isinstance(namespace, ast.Constant) or namespace.value != "data":
-                continue
-            if seen_data:
-                raise ValueError("Duplicate dataclass field [metadata] key [data]")
-            seen_data = True
-            for key, options in self._field_metadata_dict(data, "data").items():
-                simple_name = {"id": "Id", "generated_value": "GeneratedValue"}.get(key)
-                if simple_name is None:
-                    raise ValueError(f"Unknown dataclass field data annotation [{key}]")
-                options = self._field_metadata_literal(options)
-                if isinstance(options, ast.Constant) and options.value is False:
-                    continue
-                if isinstance(options, ast.Constant) and options.value is True:
-                    member_nodes = {}
-                elif key == "generated_value" and isinstance(options, ast.Dict):
-                    member_nodes = self._field_metadata_dict(options, "data.generated_value")
-                else:
-                    raise ValueError(f"Data [{key}] requires a boolean{' or member dictionary' if key == 'generated_value' else ''}")
-                unknown = member_nodes.keys() - {"value", "definition", "ref"}
-                if unknown:
-                    raise ValueError(f"Unknown member [{sorted(unknown)[0]}] of @GeneratedValue")
-                canonical_name = f"io.micronaut.data.annotation.{simple_name}"
-                members = {}
-                for name, member_node in member_nodes.items():
-                    if not isinstance(member_node, (ast.Constant, ast.Name, ast.Attribute)):
-                        raise ValueError(f"Member [{name}] of @{canonical_name} must be a compile-time string")
-                    value = convert_annotation_member_value(canonical_name, name, member_node, self)
-                    if isinstance(member_node, (ast.Name, ast.Attribute)):
-                        written_name = self._callable_name(member_node)
-                        resolved_name = self._resolved_callable_name(member_node)
-                        constant_key = _current_class_constant_key(self, written_name)
-                        if not (written_name in self.local_constant_values or resolved_name in self.local_constant_values
-                                or constant_key in self.local_constant_values):
-                            raise ValueError(f"Member [{name}] of @{canonical_name} must be a compile-time string")
-                    if not isinstance(value, str) or (name == "value" and value not in {"AUTO", "SEQUENCE", "IDENTITY", "UUID"}):
-                        raise ValueError(f"Invalid value for member [{name}] of @{canonical_name}: [{value}]")
-                    members[name] = value
-                decorators.append(DecoratorDef(simple_name, canonical_name, None, members, []))
-        return decorators
 
     def _dataclass_field_validation(self, metadata):
         # Only the recognized namespace is ours: third-party metadata can be dynamic.
