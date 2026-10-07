@@ -1188,7 +1188,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      */
     public <I, B> ExecutionFlow<HttpResponse<BodyElements<Event<B>>>> exchangeEventStreamFlow(HttpRequest<I> request, Argument<B> eventType, Argument<?> errorType) {
         return exchangeElementsFlow(request, errorType, AcceptEvents.ADD, true,
-            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize()));
+            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize(), this::decorate));
     }
 
     /**
@@ -1217,12 +1217,36 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      */
     private <I> ExecutionFlow<HttpResponse<BodyElements<ByteBuffer<?>>>> dataStreamFlow(HttpRequest<I> request, Argument<?> errorType) {
         return exchangeElementsFlow(request, errorType, AcceptEvents.AS_IS, shouldBufferErrorBody(errorType),
-            (req, response) -> {
-                CloseableByteBody body = response.byteBody().move();
-                return ElementsResponse.of(response, isAcceptEvents(req)
-                    ? BodyPieces.lines(body, sizeLimits().maxBufferSize())
-                    : BodyPieces.elements(body));
-            });
+            (req, response) -> ElementsResponse.of(response, streamPieces(response.byteBody().move(), isAcceptEvents(req))));
+    }
+
+    /**
+     * The pieces of the body of {@link #dataStream} and {@link #exchangeStream}: the lines of an
+     * event stream that the request accepts, or the pieces of the body as they are read. As a
+     * publisher, the body is read as it arrives, with the bytes that wait for the subscriber
+     * limited by {@code max-content-length}.
+     *
+     * @param body  The body, which the pieces take over
+     * @param lines Whether the body is split into the lines of an event stream
+     * @return The pieces of the body
+     */
+    protected BodyElements<ByteBuffer<?>> streamPieces(CloseableByteBody body, boolean lines) {
+        return new StreamedPieces(body, lines, sizeLimits().maxBufferSize());
+    }
+
+    /**
+     * The publisher of the pieces of {@link #dataStream} and {@link #exchangeStream}.
+     *
+     * @param pieces The pieces of {@link #streamPieces}, or other pieces, e.g. of a response that
+     *               a client filter replaced
+     * @return The publisher of the pieces, for one subscriber
+     */
+    protected Publisher<ByteBuffer<?>> streamPiecesPublisher(BodyElements<ByteBuffer<?>> pieces) {
+        if (pieces instanceof StreamedPieces streamed) {
+            return streamed.publisher();
+        }
+        // e.g. the empty body of a response without one
+        return new BodyElementsPublisher<>(pieces);
     }
 
     /**
@@ -1374,7 +1398,8 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
     }
 
     /**
-     * The events of {@link #eventStream}: the request accepts only an event stream.
+     * The events of {@link #eventStream}: the request accepts only an event stream, and the body
+     * is read as one, whatever its content type, as it always was.
      *
      * @param request   The request
      * @param eventType The event data type
@@ -1385,7 +1410,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      */
     private <I, B> Publisher<Event<B>> eventStreamOrError(HttpRequest<I> request, Argument<B> eventType, @Nullable Argument<?> errorType) {
         return elements(() -> exchangeElementsFlow(request, errorType == null ? DEFAULT_ERROR_TYPE : errorType, AcceptEvents.ONLY, shouldBufferErrorBody(errorType),
-            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize())));
+            (req, response) -> EventStreams.eventStreamResponse(response, handlerRegistry, eventType, sizeLimits().maxBufferSize(), this::decorate)));
     }
 
     // ---- streams
@@ -1397,7 +1422,9 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
 
     @Override
     public <I> Publisher<ByteBuffer<?>> dataStream(HttpRequest<I> request, @Nullable Argument<?> errorType) {
-        return elements(() -> dataStreamFlow(request, errorType == null ? DEFAULT_ERROR_TYPE : errorType));
+        PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
+        return Flux.defer(() -> toMono(dataStreamFlow(request, errorType == null ? DEFAULT_ERROR_TYPE : errorType), propagatedContext)
+            .flatMapMany(response -> streamPiecesPublisher(Objects.requireNonNull(response.body(), "The response has no body"))));
     }
 
     @Override
@@ -1411,7 +1438,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         return Flux.defer(() -> toMono(dataStreamFlow(request, errorType), propagatedContext)
             .flatMapMany(response -> {
                 BodyElements<ByteBuffer<?>> pieces = Objects.requireNonNull(response.body(), "The response has no body");
-                return Flux.from(new BodyElementsPublisher<>(pieces))
+                return Flux.from(streamPiecesPublisher(pieces))
                     .map(piece -> (HttpResponse<ByteBuffer<?>>) new ElementResponse<ByteBuffer<?>>(response, piece));
             }));
     }
