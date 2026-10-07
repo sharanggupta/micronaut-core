@@ -2419,6 +2419,31 @@ class ProductMappers:
     }
 
     @Test
+    void testDataclassFieldDataMetadata() {
+        PythonAstParser pythonProcessor = new PythonAstParser();
+        try (PythonEnvironment environment = pythonProcessor.parse("""
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class Fruit:
+                name: str
+                id: int | None = field(default=None, metadata={"data": {"id": True, "generated_value": True}})
+            """)) {
+            ClassDef fruit = environment.classes().get("Fruit");
+            var id = fruit.attributes().get(1);
+            assertTrue(id.decorators().stream().anyMatch(d -> d.annotationName().equals("jakarta.annotation.Nullable")));
+            assertEquals(List.of("io.micronaut.data.annotation.Id", "io.micronaut.data.annotation.GeneratedValue"),
+                id.decorators().stream().map(DecoratorDef::annotationName)
+                    .filter(name -> name.startsWith("io.micronaut.data.annotation.")).toList());
+            assertTrue(id.hasDefaultValue(), "explicit None remains a default");
+            assertNull(id.value());
+            assertTrue(fruit.decorators().stream().anyMatch(d -> d.annotationName().equals("io.micronaut.data.annotation.MappedEntity")));
+            assertFalse(fruit.decorators().stream().anyMatch(d -> d.annotationName().equals("io.micronaut.core.annotation.Introspected")),
+                "MappedEntity supplies Data-specific introspection indexes");
+        }
+    }
+
+    @Test
     void testDataclassFieldValidationMetadata() {
         PythonAstParser pythonProcessor = new PythonAstParser();
         try (PythonEnvironment environment = pythonProcessor.parse("""
