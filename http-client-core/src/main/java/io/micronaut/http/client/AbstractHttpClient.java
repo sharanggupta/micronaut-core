@@ -24,10 +24,8 @@ import io.micronaut.core.execution.ExecutionFlow;
 import io.micronaut.core.execution.ImperativeExecutionFlow;
 import io.micronaut.core.io.buffer.ByteBuffer;
 import io.micronaut.core.io.buffer.ByteBufferFactory;
-import io.micronaut.core.io.buffer.ReferenceCounted;
 import io.micronaut.core.propagation.PropagatedContext;
 import io.micronaut.core.type.Argument;
-import io.micronaut.core.util.ArrayUtils;
 import io.micronaut.core.util.StringUtils;
 import io.micronaut.discovery.ServiceInstance;
 import io.micronaut.http.BasicHttpAttributes;
@@ -46,13 +44,13 @@ import io.micronaut.http.body.CloseableAvailableByteBody;
 import io.micronaut.http.body.CloseableByteBody;
 import io.micronaut.http.body.InternalByteBody;
 import io.micronaut.http.body.MessageBodyHandlerRegistry;
-import io.micronaut.http.body.MessageBodyReader;
 import io.micronaut.http.body.PieceReader;
 import io.micronaut.http.body.stream.BodyElementsPublisher;
 import io.micronaut.http.body.stream.BodySizeLimits;
 import io.micronaut.http.body.stream.ByteBodyElements;
 import io.micronaut.http.body.stream.PieceReaders;
 import io.micronaut.http.client.exceptions.ContentLengthExceededException;
+import io.micronaut.http.client.exceptions.HttpClientErrorDecoder;
 import io.micronaut.http.client.exceptions.HttpClientException;
 import io.micronaut.http.client.exceptions.HttpClientExceptionUtils;
 import io.micronaut.http.client.exceptions.HttpClientResponseException;
@@ -81,20 +79,15 @@ import io.micronaut.http.util.HttpHeadersUtil;
 import io.micronaut.core.async.propagation.ReactivePropagation;
 import org.jspecify.annotations.Nullable;
 import org.reactivestreams.Publisher;
-import org.reactivestreams.Subscriber;
-import org.reactivestreams.Subscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.Disposable;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -144,6 +137,12 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      */
     public static final String NO_FOLLOW_REDIRECTS = "micronaut.http.client.raw.no-follow-redirects";
 
+    /**
+     * Request attribute of an exchange whose response body is read whole, see
+     * {@link #readFullResponse}: a transport may read it into memory right away.
+     */
+    public static final String BUFFER_RESPONSE = "micronaut.http.client.buffer-response";
+
     private static final String REDIRECT_COUNT = "micronaut.http.client.redirect-count";
 
     protected final HttpClientConfiguration configuration;
@@ -157,6 +156,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
     protected final Logger log;
     @Nullable
     protected final LoadBalancer loadBalancer;
+    @Nullable
     protected final HttpClientFilterResolver<ClientFilterResolutionContext> filterResolver;
     protected final List<HttpFilterResolver.FilterEntry> clientFilterEntries;
     /**
@@ -167,6 +167,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
     @Nullable
     protected final String informationalServiceId;
     protected final ConversionService conversionService;
+    @Nullable
     protected MediaTypeCodecRegistry mediaTypeCodecRegistry;
     protected MessageBodyHandlerRegistry handlerRegistry;
 
@@ -180,9 +181,9 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      * @param defaultLog             The logger, unless the configuration names one
      * @param contextPath            The context path prepended to relative request URIs, or {@code null}
      * @param loadBalancer           The load balancer of relative request URIs, or {@code null}
-     * @param mediaTypeCodecRegistry The codecs
+     * @param mediaTypeCodecRegistry The codecs, or {@code null}
      * @param handlerRegistry        The body readers and writers
-     * @param filterResolver         The resolver of the filters
+     * @param filterResolver         The resolver of the filters, or {@code null} for no filters
      * @param clientFilterEntries    The filter entries of this client, or {@code null} to resolve them
      * @param conversionService      The conversion service
      * @param informationalServiceId The service id of the client for its exceptions, or {@code null}
@@ -191,9 +192,9 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
                                  Logger defaultLog,
                                  @Nullable String contextPath,
                                  @Nullable LoadBalancer loadBalancer,
-                                 MediaTypeCodecRegistry mediaTypeCodecRegistry,
+                                 @Nullable MediaTypeCodecRegistry mediaTypeCodecRegistry,
                                  MessageBodyHandlerRegistry handlerRegistry,
-                                 HttpClientFilterResolver<ClientFilterResolutionContext> filterResolver,
+                                 @Nullable HttpClientFilterResolver<ClientFilterResolutionContext> filterResolver,
                                  @Nullable List<HttpFilterResolver.FilterEntry> clientFilterEntries,
                                  ConversionService conversionService,
                                  @Nullable String informationalServiceId) {
@@ -210,9 +211,14 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         this.handlerRegistry = handlerRegistry;
         this.log = configuration.getLoggerName().map(LoggerFactory::getLogger).orElse(defaultLog);
         this.filterResolver = filterResolver;
-        this.clientFilterEntries = clientFilterEntries != null ? clientFilterEntries
-            : filterResolver.resolveFilterEntries(new ClientFilterResolutionContext(null, AnnotationMetadata.EMPTY_METADATA));
-        this.noFilters = this.clientFilterEntries.isEmpty() && filterResolver.getClass() == DefaultHttpClientFilterResolver.class;
+        if (clientFilterEntries != null) {
+            this.clientFilterEntries = clientFilterEntries;
+        } else if (filterResolver != null) {
+            this.clientFilterEntries = filterResolver.resolveFilterEntries(new ClientFilterResolutionContext(null, AnnotationMetadata.EMPTY_METADATA));
+        } else {
+            this.clientFilterEntries = List.of();
+        }
+        this.noFilters = filterResolver == null || this.clientFilterEntries.isEmpty() && filterResolver.getClass() == DefaultHttpClientFilterResolver.class;
         this.conversionService = conversionService;
         this.informationalServiceId = informationalServiceId;
         this.redirectSameOriginPreserveBodyHeaders = redirectFilteredHeaders(false, true);
@@ -306,7 +312,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
     /**
      * @return The {@link MediaTypeCodecRegistry} used by this client
      */
-    public MediaTypeCodecRegistry getMediaTypeCodecRegistry() {
+    public @Nullable MediaTypeCodecRegistry getMediaTypeCodecRegistry() {
         return mediaTypeCodecRegistry;
     }
 
@@ -524,10 +530,10 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
                 }
 
                 try {
-                    return new ResolvedTarget(server.resolve(includeContextPath ? ContextPathUtils.prepend(requestURI, contextPath) : requestURI), selection);
-                } catch (URISyntaxException e) {
+                    return new ResolvedTarget(resolveAgainst(server, requestURI, includeContextPath), selection);
+                } catch (RuntimeException e) {
                     selection.release();
-                    throw decorate(new HttpClientException("Failed to construct the request URI", e));
+                    throw e;
                 }
             }
         );
@@ -587,25 +593,33 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         }
 
         List<GenericHttpFilter> filters;
-        if (noFilters) {
+        if (noFilters || filterResolver == null) {
             filters = List.of();
         } else {
             filters = filterResolver.resolveFilters(request, clientFilterEntries);
             FilterRunner.sortReverse(filters);
         }
 
+        URI resolvedUri = request.getUri();
         FilterRunner runner = new FilterRunner(filters) {
             @Override
             protected ExecutionFlow<HttpResponse<?>> provideResponse(HttpRequest<?> request, PropagatedContext propagatedContext) {
                 try {
-                    return propagatedContext.propagate(() -> sendRequestWithRedirectsNoFilter(
-                        propagatedContext,
-                        preferredScheduler,
-                        blockedThread,
-                        MutableHttpRequestWrapper.wrapIfNecessary(conversionService, request),
-                        selection,
-                        readResponse
-                    ));
+                    MutableHttpRequest<?> filtered = MutableHttpRequestWrapper.wrapIfNecessary(conversionService, request);
+                    // a filter may have changed the URI of the request
+                    return afterFilters(resolvedUri, selection, filtered).flatMap(sent -> {
+                        ExecutionFlow<HttpResponse<?>> sending = propagatedContext.propagate(() -> sendRequestWithRedirectsNoFilter(
+                            propagatedContext,
+                            preferredScheduler,
+                            blockedThread,
+                            sent.uri().equals(filtered.getUri()) ? filtered : filtered.uri(sent.uri()),
+                            sent.selection(),
+                            readResponse
+                        ));
+                        LoadBalancerSelection other = sent.selection();
+                        // a selection made for the filtered request ends with its exchange too
+                        return other == null || other == selection ? sending : releaseWhenDone(sending, other);
+                    });
                 } catch (Throwable e) {
                     return ExecutionFlow.error(e);
                 }
@@ -617,6 +631,10 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         }
         // the selection ends with the exchange, whether it was sent, failed before, was
         // cancelled, or a filter answered without it: unless the response handling took it over
+        return releaseWhenDone(flow, selection);
+    }
+
+    private static ExecutionFlow<HttpResponse<?>> releaseWhenDone(ExecutionFlow<HttpResponse<?>> flow, LoadBalancerSelection selection) {
         DelayedExecutionFlow<HttpResponse<?>> released = DelayedExecutionFlow.create();
         flow.onComplete((response, failure) -> {
             selection.releaseUnclaimed();
@@ -631,6 +649,67 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
             selection.releaseUnclaimed();
         });
         return released;
+    }
+
+    /**
+     * The target of a request once the client filters ran, since a filter may have changed its
+     * URI: the request stays with the instance the load balancer selected as long as it goes to
+     * the same scheme, host and port, and the load balancer is not asked again.
+     *
+     * @param resolved  The URI resolved before the filters ran
+     * @param selection The selection of the load balancer before the filters ran, or {@code null}
+     * @param request   The request the filters passed on
+     * @return The target the request is sent to
+     */
+    protected ExecutionFlow<ResolvedTarget> afterFilters(URI resolved, @Nullable LoadBalancerSelection selection, HttpRequest<?> request) {
+        URI filtered = request.getUri();
+        if (filtered.equals(resolved)) {
+            return ExecutionFlow.just(new ResolvedTarget(resolved, selection));
+        }
+        if (filtered.getScheme() != null) {
+            return ExecutionFlow.just(new ResolvedTarget(filtered, sameServer(filtered, resolved) ? selection : null));
+        }
+        if (selection == null) {
+            return resolveRequestURI(request);
+        }
+        try {
+            return ExecutionFlow.just(new ResolvedTarget(resolveAgainst(selection.instance(), filtered, true), selection));
+        } catch (RuntimeException e) {
+            return ExecutionFlow.error(e);
+        }
+    }
+
+    /**
+     * @param a The first URI
+     * @param b The second URI
+     * @return Whether both URIs name the same server: scheme and host ignoring case, and port,
+     * the default port of the scheme when there is none
+     */
+    protected static boolean sameServer(URI a, URI b) {
+        return a.getScheme() != null && a.getScheme().equalsIgnoreCase(b.getScheme())
+            && a.getHost() != null && a.getHost().equalsIgnoreCase(b.getHost())
+            && effectivePort(a) == effectivePort(b);
+    }
+
+    private static int effectivePort(URI uri) {
+        if (uri.getPort() != -1) {
+            return uri.getPort();
+        }
+        return "https".equalsIgnoreCase(uri.getScheme()) || "wss".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    /**
+     * @param instance           The service instance
+     * @param requestUri         The relative request URI
+     * @param includeContextPath Whether to prepend the context path of the client
+     * @return The request URI resolved against the instance
+     */
+    private URI resolveAgainst(ServiceInstance instance, URI requestUri, boolean includeContextPath) {
+        try {
+            return instance.resolve(includeContextPath ? ContextPathUtils.prepend(requestUri, contextPath) : requestUri);
+        } catch (URISyntaxException e) {
+            throw decorate(new HttpClientException("Failed to construct the request URI", e));
+        }
     }
 
     private ExecutionFlow<HttpResponse<?>> sendRequestWithRedirectsNoFilter(
@@ -664,8 +743,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
                 }
                 redirectRequest.setAttribute(REDIRECT_COUNT, redirectCount);
                 // the per-exchange options apply to the whole exchange, redirects included
-                request.getAttribute(NO_DECOMPRESSION).ifPresent(noDecompression -> redirectRequest.setAttribute(NO_DECOMPRESSION, noDecompression));
-                request.getAttribute(READ_IDLE_TIMEOUT).ifPresent(timeout -> redirectRequest.setAttribute(READ_IDLE_TIMEOUT, timeout));
+                copyRedirectAttributes(request, redirectRequest);
                 return resolveRedirectURI(request, redirectRequest)
                     .flatMap(target -> {
                         setRedirectHeaders(request, redirectRequest.uri(target.uri()), preserveBody);
@@ -687,6 +765,19 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
                 return readResponse.apply(request, byteBodyResponse);
             }
         });
+    }
+
+    /**
+     * Copy the attributes of a request that apply to the whole exchange to the request of a
+     * redirect.
+     *
+     * @param request  The request that was redirected
+     * @param redirect The request of the redirect
+     */
+    protected void copyRedirectAttributes(MutableHttpRequest<?> request, MutableHttpRequest<?> redirect) {
+        request.getAttribute(NO_DECOMPRESSION).ifPresent(noDecompression -> redirect.setAttribute(NO_DECOMPRESSION, noDecompression));
+        request.getAttribute(READ_IDLE_TIMEOUT).ifPresent(timeout -> redirect.setAttribute(READ_IDLE_TIMEOUT, timeout));
+        request.getAttribute(BUFFER_RESPONSE).ifPresent(buffer -> redirect.setAttribute(BUFFER_RESPONSE, buffer));
     }
 
     private void setRedirectHeaders(@Nullable HttpRequest<?> request,
@@ -737,6 +828,27 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
             headers.addAll(configuration.getRedirectAdditionalNonPreserveBodyFilteredHeaders());
         }
         return headers;
+    }
+
+    /**
+     * Read the whole body of a response, and build the response of the exchange, see
+     * {@link #fullResponse}.
+     *
+     * @param response   The raw response
+     * @param bodyType   The body type, or {@code null}
+     * @param errorType  The error type
+     * @param readFailure Maps a failure to read the body
+     * @param <O>        The body type
+     * @param <E>        The error type
+     * @return The flow of the response, or of the error of an error status
+     */
+    protected <O, E> ExecutionFlow<? extends HttpResponse<O>> readFullResponse(R response,
+                                                                              @Nullable Argument<O> bodyType,
+                                                                              Argument<E> errorType,
+                                                                              Function<Throwable, Throwable> readFailure) {
+        return InternalByteBody.bufferFlow(response.byteBody())
+            .onErrorResume(t -> ExecutionFlow.error(readFailure.apply(t)))
+            .flatMap(av -> fullResponse(bodyType, errorType, response, av));
     }
 
     // ---- errors
@@ -793,6 +905,50 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         String name = error.toString();
         int start = Math.max(name.lastIndexOf('.'), name.lastIndexOf('$')) + 1;
         return name.substring(start);
+    }
+
+    /**
+     * Whether the body of a response is decoded into the body type: unless the status is an
+     * error, which fails the exchange, except when the body type is the error type and the client
+     * does not fail on an error status.
+     *
+     * @param code      The status of the response
+     * @param bodyType  The body type, or {@code null}
+     * @param errorType The error type
+     * @param <O>       The body type
+     * @param <E>       The error type
+     * @return Whether the body is decoded into the body type
+     */
+    protected <O, E> boolean convertsWithBodyType(int code, @Nullable Argument<O> bodyType, Argument<E> errorType) {
+        if (code < 400) {
+            return true;
+        }
+        return !configuration.isExceptionOnErrorStatus() && bodyType != null && bodyType.equalsType(errorType);
+    }
+
+    /**
+     * The failure of an exchange whose response has an error status: its body is decoded into
+     * the error type.
+     *
+     * @param errorType The error type, or {@code null}
+     * @param response  The response
+     * @return The failure
+     */
+    protected HttpClientResponseException errorStatusException(@Nullable Argument<?> errorType, HttpResponse<?> response) {
+        if (errorType != null && errorType != HttpClient.DEFAULT_ERROR_TYPE) {
+            return decorate(new HttpClientResponseException(
+                response.reason(),
+                null,
+                response,
+                new HttpClientErrorDecoder() {
+                    @Override
+                    public Argument<?> getErrorType(MediaType mediaType) {
+                        return errorType;
+                    }
+                }
+            ));
+        }
+        return decorate(new HttpClientResponseException(response.reason(), response));
     }
 
     /**
@@ -895,6 +1051,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
         AtomicBoolean headersReceived = new AtomicBoolean();
         ExecutionFlow<HttpResponse<O>> flow = resolveRequestURI(request).flatMap(target -> {
             MutableHttpRequest<?> mutableRequest = toMutableRequest(request).uri(target.uri());
+            mutableRequest.setAttribute(BUFFER_RESPONSE, Boolean.TRUE);
             //noinspection unchecked
             return sendRequestWithRedirects(
                 propagatedContext,
@@ -904,15 +1061,13 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
                 target.selection(),
                 (req, resp) -> {
                     headersReceived.set(true);
-                    return InternalByteBody.bufferFlow(resp.byteBody())
-                        .onErrorResume(t -> {
-                            headersReceived.set(false);
-                            return ExecutionFlow.error(handleResponseError(mutableRequest, target.instance(), t));
-                        })
-                        .flatMap(av -> {
-                            headersReceived.set(false);
-                            return fullResponse(bodyType, errorType, resp, av);
-                        });
+                    return readFullResponse(resp, bodyType, errorType, t -> {
+                        headersReceived.set(false);
+                        return handleResponseError(mutableRequest, target.instance(), t);
+                    }).map(r -> {
+                        headersReceived.set(false);
+                        return r;
+                    });
                 }
             ).map(r -> (HttpResponse<O>) r);
         });
@@ -1104,163 +1259,89 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
             .flatMapMany(response -> {
                 BodyElements<Event<B>> events = Objects.requireNonNull(response.body(), "The response has no events");
                 return Flux.from(new BodyElementsPublisher<>(events))
-                    .map(event -> (HttpResponse<Event<B>>) new EventResponse<>(response, event))
+                    .map(event -> (HttpResponse<Event<B>>) new ElementResponse<Event<B>>(response, event))
                     // without an event, the status and the headers of the response are still of interest
-                    .switchIfEmpty(Mono.fromSupplier(() -> new EventResponse<>(response, null)));
+                    .switchIfEmpty(Mono.fromSupplier(() -> new ElementResponse<Event<B>>(response, null)));
             }));
     }
 
     @Override
-    public abstract <I> Publisher<ByteBuffer<?>> dataStream(HttpRequest<I> request, @Nullable Argument<?> errorType);
-
-    @Override
-    public <I> Publisher<Event<ByteBuffer<?>>> eventStream(HttpRequest<I> request) {
-        setupConversionService(request);
-        return eventStreamOrError(request, null);
-    }
-
-    @Override
     public <I, B> Publisher<Event<B>> eventStream(HttpRequest<I> request, Argument<B> eventType) {
-        setupConversionService(request);
         return eventStream(request, eventType, DEFAULT_ERROR_TYPE);
     }
 
     @Override
     public <I, B> Publisher<Event<B>> eventStream(HttpRequest<I> request, Argument<B> eventType, Argument<?> errorType) {
-        setupConversionService(request);
-        MessageBodyReader<B> reader = handlerRegistry.getReader(eventType, List.of(MediaType.APPLICATION_JSON_TYPE));
-        return Flux.from(eventStreamOrError(request, errorType)).map(byteBufferEvent -> {
-            ByteBuffer<?> data = byteBufferEvent.getData();
-
-            B decoded = reader.read(eventType, MediaType.APPLICATION_JSON_TYPE, request.getHeaders(), data);
-            return Event.of(byteBufferEvent, Objects.requireNonNull(decoded));
-        });
+        return elements(() -> exchangeEventStreamFlow(request, eventType, errorType));
     }
 
-    @SuppressWarnings("SubscriberImplementation")
-    private <I> Publisher<Event<ByteBuffer<?>>> eventStreamOrError(HttpRequest<I> request, @Nullable Argument<?> errorType) {
+    @Override
+    public <I> Publisher<Event<ByteBuffer<?>>> eventStream(HttpRequest<I> request) {
+        return Flux.from(eventStream(request, Argument.of(byte[].class)))
+            .map(event -> Event.of(event, (ByteBuffer<?>) byteBufferFactory().wrap(event.getData())));
+    }
 
-        if (request instanceof MutableHttpRequest<?> httpRequest) {
-            // replace, rather than add to, what the caller accepts: a server that may answer with another type, such
-            // as JSON, would otherwise do so, and the body would yield no event
-            httpRequest.getHeaders().set(HttpHeaders.ACCEPT, MediaType.TEXT_EVENT_STREAM);
-        }
+    // ---- streams
 
-        return Flux.create(emitter ->
-            dataStream(request, errorType).subscribe(new Subscriber<>() {
-                @Nullable
-                private Subscription dataSubscription;
-                @Nullable
-                private CurrentEvent currentEvent;
+    @Override
+    public <I> Publisher<ByteBuffer<?>> dataStream(HttpRequest<I> request) {
+        return dataStream(request, DEFAULT_ERROR_TYPE);
+    }
 
-                @Override
-                public void onSubscribe(Subscription s) {
-                    this.dataSubscription = s;
-                    Disposable cancellable = s::cancel;
-                    emitter.onCancel(cancellable);
-                    if (!emitter.isCancelled() && emitter.requestedFromDownstream() > 0) {
-                        // request the first chunk
-                        dataSubscription.request(1);
-                    }
-                }
+    @Override
+    public <I> Publisher<ByteBuffer<?>> dataStream(HttpRequest<I> request, @Nullable Argument<?> errorType) {
+        return elements(() -> exchangeStreamFlow(request, errorType == null ? DEFAULT_ERROR_TYPE : errorType));
+    }
 
-                @Override
-                public void onNext(ByteBuffer<?> buffer) {
+    @Override
+    public <I> Publisher<HttpResponse<ByteBuffer<?>>> exchangeStream(HttpRequest<I> request) {
+        return exchangeStream(request, DEFAULT_ERROR_TYPE);
+    }
 
-                    try {
-                        int len = buffer.readableBytes();
+    @Override
+    public <I> Publisher<HttpResponse<ByteBuffer<?>>> exchangeStream(HttpRequest<I> request, Argument<?> errorType) {
+        PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
+        return Flux.defer(() -> toMono(exchangeStreamFlow(request, errorType), propagatedContext)
+            .flatMapMany(response -> {
+                BodyElements<ByteBuffer<?>> pieces = Objects.requireNonNull(response.body(), "The response has no body");
+                return Flux.from(new BodyElementsPublisher<>(pieces))
+                    .map(piece -> (HttpResponse<ByteBuffer<?>>) new ElementResponse<ByteBuffer<?>>(response, piece));
+            }));
+    }
 
-                        // a length of zero indicates the start of a new event
-                        // emit the current event
-                        if (len == 0) {
-                            try {
-                                Event event = Event.of(byteBufferFactory().wrap(Objects.requireNonNull(currentEvent).data))
-                                    .name(currentEvent.name)
-                                    .retry(currentEvent.retry)
-                                    .id(currentEvent.id);
-                                emitter.next(
-                                    event
-                                );
-                            } finally {
-                                currentEvent = null;
-                            }
-                        } else {
-                            if (currentEvent == null) {
-                                currentEvent = new CurrentEvent();
-                            }
-                            int colonIndex = buffer.indexOf((byte) ':');
-                            // SSE comments start with colon, so skip
-                            if (colonIndex > 0) {
-                                // obtain the type
-                                String type = buffer.slice(0, colonIndex).toString(StandardCharsets.UTF_8).trim();
-                                int fromIndex = colonIndex + 1;
-                                // skip the white space before the actual data
-                                if (buffer.getByte(fromIndex) == ((byte) ' ')) {
-                                    fromIndex++;
-                                }
-                                if (fromIndex < len) {
-                                    int toIndex = len - fromIndex;
-                                    switch (type) {
-                                        case "data" -> {
-                                            ByteBuffer<?> content = buffer.slice(fromIndex, toIndex);
-                                            byte[] d = currentEvent.data;
-                                            if (d.length == 0) {
-                                                currentEvent.data = content.toByteArray();
-                                            } else {
-                                                // data lines are joined with a line feed
-                                                currentEvent.data = ArrayUtils.concat(ArrayUtils.concat(d, (byte) '\n'), content.toByteArray());
-                                            }
-                                        }
-                                        case "id" -> {
-                                            ByteBuffer<?> id = buffer.slice(fromIndex, toIndex);
-                                            currentEvent.id = id.toString(StandardCharsets.UTF_8).trim();
-                                        }
-                                        case "event" -> {
-                                            ByteBuffer<?> event = buffer.slice(fromIndex, toIndex);
-                                            currentEvent.name = event.toString(StandardCharsets.UTF_8).trim();
-                                        }
-                                        case "retry" -> {
-                                            ByteBuffer<?> retry = buffer.slice(fromIndex, toIndex);
-                                            String text = retry.toString(StandardCharsets.UTF_8);
-                                            if (!StringUtils.isEmpty(text)) {
-                                                currentEvent.retry = Duration.ofMillis(Long.parseLong(text));
-                                            }
-                                        }
-                                        default -> {
-                                            // ignore message
-                                        }
-                                    }
-                                }
-                            }
-                        }
+    @Override
+    public <I, O> Publisher<O> jsonStream(HttpRequest<I> request, Argument<O> type) {
+        return jsonStream(request, type, DEFAULT_ERROR_TYPE);
+    }
 
-                        if (emitter.requestedFromDownstream() > 0 && !emitter.isCancelled()) {
-                            Objects.requireNonNull(dataSubscription).request(1);
-                        }
-                    } catch (Throwable e) {
-                        onError(e);
-                    } finally {
-                        if (buffer instanceof ReferenceCounted counted) {
-                            counted.release();
-                        }
-                    }
-                }
+    @Override
+    public <I, O> Publisher<O> jsonStream(HttpRequest<I> request, Argument<O> type, Argument<?> errorType) {
+        return elements(() -> jsonStreamFlow(request, type, errorType));
+    }
 
-                @Override
-                public void onError(Throwable t) {
-                    Objects.requireNonNull(dataSubscription).cancel();
-                    if (t instanceof HttpClientException) {
-                        emitter.error(t);
-                    } else {
-                        emitter.error(decorate(new HttpClientException("Error consuming Server Sent Events: " + t.getMessage(), t)));
-                    }
-                }
+    @SuppressWarnings("unchecked")
+    @Override
+    public <I> Publisher<Map<String, Object>> jsonStream(HttpRequest<I> request) {
+        return (Publisher) jsonStream(request, Map.class);
+    }
 
-                @Override
-                public void onComplete() {
-                    emitter.complete();
-                }
-            }), FluxSink.OverflowStrategy.BUFFER);
+    @Override
+    public <I, O> Publisher<O> jsonStream(HttpRequest<I> request, Class<O> type) {
+        return jsonStream(request, Argument.of(type));
+    }
+
+    /**
+     * The elements of the body of a response, as a publisher: the exchange starts when the
+     * publisher is subscribed to.
+     *
+     * @param exchange Starts the exchange
+     * @param <T>      The type of an element
+     * @return The elements
+     */
+    private static <T> Publisher<T> elements(java.util.function.Supplier<ExecutionFlow<HttpResponse<BodyElements<T>>>> exchange) {
+        PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
+        return Flux.defer(() -> toMono(exchange.get(), propagatedContext)
+            .flatMapMany(response -> Flux.from(new BodyElementsPublisher<>(Objects.requireNonNull(response.body(), "The response has no elements")))));
     }
 
     // ---- flows
@@ -1286,7 +1367,7 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
      * @return The flow value
      */
     @Nullable
-    protected static <T> T awaitFlow(ExecutionFlow<T> flow) {
+    public static <T> T awaitFlow(ExecutionFlow<T> flow) {
         T value;
         Throwable error;
         ImperativeExecutionFlow<T> complete = flow.tryComplete();
@@ -1341,19 +1422,6 @@ public abstract class AbstractHttpClient<R extends ByteBodyHttpResponse<?>> impl
             }
             return uri;
         }
-    }
-
-    /**
-     * Used as a holder for the current SSE event.
-     */
-    private static final class CurrentEvent {
-        byte[] data = new byte[0];
-        @Nullable
-        String id;
-        @Nullable
-        String name;
-        @Nullable
-        Duration retry;
     }
 
     /**
