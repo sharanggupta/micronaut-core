@@ -113,6 +113,54 @@ public final class EventStreams {
     }
 
     /**
+     * The events of the response of {@code SseClient#eventStream}: the body is read as an event
+     * stream whatever its content type, as that method always read it. A failure to read the
+     * body is an {@link HttpClientException}, decorated like the other failures of the client,
+     * and a failure to decode the data of an event is the failure of the reader of the data, as
+     * it is.
+     *
+     * @param response        The response, with a status that is not an error
+     * @param handlerRegistry The readers of the event data
+     * @param eventType       The event data type
+     * @param maxBufferSize   The maximum size of a line, and of the data of one event
+     * @param decorate        Decorates a failure of the events like the other failures of the
+     *                        client, e.g. with its service id
+     * @param <B>             The event data type
+     * @return The response, whose body is the events
+     */
+    public static <B> HttpResponse<BodyElements<Event<B>>> eventStreamResponse(ByteBodyHttpResponse<?> response,
+                                                                              MessageBodyHandlerRegistry handlerRegistry,
+                                                                              Argument<B> eventType,
+                                                                              long maxBufferSize,
+                                                                              UnaryOperator<HttpClientException> decorate) {
+        Function<Throwable, Throwable> wrap = error -> error instanceof DataDecodeFailure failure && failure.getCause() != null
+            ? failure.getCause()
+            : wrap(error, decorate);
+        CloseableByteBody body = response.byteBody().move();
+        try {
+            MessageBodyReader<B> reader = handlerRegistry.getReader(eventType, List.of(MediaType.APPLICATION_JSON_TYPE));
+            HttpHeaders headers = response.getHeaders();
+            Function<byte[], B> rawFailures = data -> {
+                B decoded;
+                try {
+                    decoded = reader.read(eventType, MediaType.APPLICATION_JSON_TYPE, headers, new ByteArrayInputStream(data));
+                } catch (RuntimeException e) {
+                    throw new DataDecodeFailure(e);
+                }
+                if (decoded == null) {
+                    // as the events were mapped with Objects.requireNonNull
+                    throw new DataDecodeFailure(new NullPointerException("Event data decoded to null for type " + eventType));
+                }
+                return decoded;
+            };
+            return ElementsResponse.of(response, new ByteBodyElements<>(body, new EventReader<>(new EventStreamDecoder(maxBufferSize), rawFailures), wrap));
+        } catch (RuntimeException e) {
+            body.close();
+            throw e;
+        }
+    }
+
+    /**
      * The reader of the events of an event stream: the lines are split as the pieces are read,
      * and the data of an event is decoded as JSON when the event is polled.
      *
@@ -165,6 +213,15 @@ public final class EventStreams {
             }
             return decoded;
         };
+    }
+
+    /**
+     * A failure to decode the data of an event, which {@code eventStream} reports as it is.
+     */
+    private static final class DataDecodeFailure extends RuntimeException {
+        DataDecodeFailure(RuntimeException cause) {
+            super(cause.getMessage(), cause, false, false);
+        }
     }
 
     /**
