@@ -75,6 +75,19 @@ public abstract class PulledBodyElements<T> implements BodyElements<T> {
     }
 
     /**
+     * Take over the waiting read, to answer it with an element that was polled under the lock
+     * of these elements, while holding that lock: another thread then no longer finds the read
+     * waiting, e.g. to answer it with the end of the elements.
+     *
+     * @return The waiting read, or {@code null}
+     */
+    protected final synchronized @Nullable CompletableFuture<Optional<T>> takeWaiting() {
+        CompletableFuture<Optional<T>> p = pending;
+        pending = null;
+        return p;
+    }
+
+    /**
      * Hand an element to the waiting read, or queue it.
      *
      * @param element The element
