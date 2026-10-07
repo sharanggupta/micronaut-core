@@ -33,7 +33,7 @@ class Contact:
     })
 ----
 
-The compiler generates introspection for Python dataclasses automatically; an explicit `@Introspected(...)` is only needed to customize its configuration. This does not add serialization or database-mapping annotations.
+The compiler generates introspection for Python dataclasses automatically; an explicit `@Introspected(...)` is only needed to customize its configuration. Introspection alone does not opt a dataclass into serialization or persistence.
 
 The compiler reads literal validation metadata and supported compile-time constants; it does not execute expressions to determine annotation values. It translates the `validation` dictionary to the existing Jakarta validation metadata. Use Micronaut Validation to enforce it at validation boundaries; ordinary Python construction such as `Contact("")` does not run validation automatically. A metadata-only field remains a required constructor argument. Explicit `default` and `default_factory` values keep their dataclass meaning.
 
@@ -77,6 +77,40 @@ Set a constraint to `True` to enable its defaults, or `False` to disable it. A d
 Constraint options also include `message`, `groups`, and `payload`. Regular expressions and flags retain Jakarta/Java semantics, not Python `re` semantics; flag names are strings such as `"CASE_INSENSITIVE"`. Temporal, null, and whitespace checks likewise use the existing validators, without coercing or stripping Python values. Repeating a constraint with a list of member dictionaries is not supported.
 
 Use `"valid": True` for cascaded validation of an introspected nested object; `valid` has no constraint options. Unknown constraint names, unknown options, missing required options, and malformed recognized validation metadata are compilation errors. Other metadata namespaces are left alone. Method parameters continue to use `Annotated[...]` metadata.
+
+== Dataclass Persistence Metadata
+
+With Micronaut Data configured, a dataclass can declare its identity using standard-library field metadata:
+
+[source,python]
+----
+from dataclasses import dataclass, field
+
+@dataclass
+class Fruit:
+    name: str
+    id: int | None = field(
+        default=None,
+        metadata={"data": {"id": True, "generated_value": True}},
+    )
+----
+
+Enabled `data` metadata opts the dataclass into the existing Micronaut Data entity mapping. The compiler translates `id` to `Id` and `generated_value` to `GeneratedValue`; the existing Data processors provide identity indexes and repository behavior. There is no second persistence engine.
+
+`id` accepts `True` or `False`. `generated_value` accepts `True` for Data's default `AUTO` strategy, `False` to disable it, or a dictionary with the existing `value`, `definition`, and `ref` options. `value` is one of `"AUTO"`, `"SEQUENCE"`, `"IDENTITY"`, or `"UUID"`; `definition` and `ref` are strings. For example:
+
+[source,python]
+----
+id: int | None = field(default=None, metadata={
+    "data": {"id": True, "generated_value": {"value": "IDENTITY"}},
+})
+----
+
+Generation strategy, property type and database support must agree, just as with the corresponding Data annotations. A generated value does not implicitly mark a field as the identity. Explicit entity annotations and composed stereotypes retain their configuration; an explicit introspection configuration also remains unchanged.
+
+Plain dataclasses, validation-only metadata, empty `data` dictionaries, and all-disabled directives remain unmapped. A field named `id` is not itself a persistence opt-in. Defaults, nullable identities, and `default_factory` retain their Python meaning. Validation and data dictionaries may coexist in the same field metadata.
+
+Only literal dictionaries and supported compile-time string constants are interpreted. Unknown keys, unknown generation strategies, duplicate recognized keys and malformed recognized data metadata are compilation errors. Other metadata namespaces are ignored. Persistence metadata does not enable JSON serialization of ordinary dataclasses; serialization remains an explicit, separate choice.
 
 == Custom Annotations
 
