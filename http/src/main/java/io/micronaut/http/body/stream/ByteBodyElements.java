@@ -69,6 +69,17 @@ public final class ByteBodyElements<T> extends PulledBodyElements<T> implements 
         this.wrap = wrap;
     }
 
+    /**
+     * The pieces of a body as they are received, pulled one at a time, see
+     * {@link io.micronaut.http.body.ByteBody#toReadBufferElements()}.
+     *
+     * @param body The body, which the elements take over
+     * @return The pieces, each of which its consumer closes
+     */
+    public static ByteBodyElements<ReadBuffer> readBuffers(CloseableByteBody body) {
+        return new ByteBodyElements<>(body, new ReadBufferPieces(), Function.identity());
+    }
+
     @Override
     protected void demand() {
         drain();
