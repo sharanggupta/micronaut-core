@@ -26,6 +26,7 @@ import org.reactivestreams.Subscription;
 import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The buffers of a body read as they arrive, whatever the demand of the subscriber, with the
@@ -61,7 +62,7 @@ final class BufferLimitedPublisher implements Publisher<ReadBuffer> {
         private final long limit;
         private final AtomicLong requested = new AtomicLong();
         private final AtomicInteger wip = new AtomicInteger();
-        private volatile @Nullable Subscription upstream;
+        private final AtomicReference<@Nullable Subscription> upstream = new AtomicReference<>();
 
         // guarded by this
         private final ArrayDeque<ReadBuffer> queue = new ArrayDeque<>();
@@ -83,7 +84,7 @@ final class BufferLimitedPublisher implements Publisher<ReadBuffer> {
 
         @Override
         public void onSubscribe(Subscription s) {
-            upstream = s;
+            upstream.set(s);
             downstream.onSubscribe(this);
             // the bytes are read as they arrive, the subscriber takes them when it asks for them
             s.request(Long.MAX_VALUE);
@@ -106,7 +107,7 @@ final class BufferLimitedPublisher implements Publisher<ReadBuffer> {
                 }
             }
             if (exceeded) {
-                Subscription s = upstream;
+                Subscription s = upstream.get();
                 if (s != null) {
                     s.cancel();
                 }
@@ -148,7 +149,7 @@ final class BufferLimitedPublisher implements Publisher<ReadBuffer> {
                     done = true;
                     error = new IllegalArgumentException("§3.9: the number of requested buffers must be positive: " + n);
                 }
-                Subscription s = upstream;
+                Subscription s = upstream.get();
                 if (s != null) {
                     s.cancel();
                 }
@@ -167,7 +168,7 @@ final class BufferLimitedPublisher implements Publisher<ReadBuffer> {
                 }
                 cancelled = true;
             }
-            Subscription s = upstream;
+            Subscription s = upstream.get();
             if (s != null) {
                 s.cancel();
             }
