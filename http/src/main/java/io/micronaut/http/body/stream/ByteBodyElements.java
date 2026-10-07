@@ -76,6 +76,7 @@ public final class ByteBodyElements<T> extends PulledBodyElements<T> implements 
      * @param body The body, which the elements take over
      * @return The pieces, each of which its consumer closes
      */
+    @SuppressWarnings("java:S2095") // the elements own the piece reader, and close it
     public static ByteBodyElements<ReadBuffer> readBuffers(CloseableByteBody body) {
         return new ByteBodyElements<>(body, new ReadBufferPieces(), Function.identity());
     }
