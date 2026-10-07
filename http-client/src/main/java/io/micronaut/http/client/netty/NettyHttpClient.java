@@ -639,7 +639,7 @@ final class NettyHttpClient implements
      */
     private <I, B> Publisher<Event<B>> eventStreamOrError(io.micronaut.http.HttpRequest<I> request, Argument<B> eventType, @Nullable Argument<?> errorType) {
         return elements(() -> exchangeElementsFlow(request, errorType == null ? DEFAULT_ERROR_TYPE : errorType, AcceptEvents.ONLY, shouldBufferErrorBody(errorType),
-            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize())));
+            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize(), this::decorate)));
     }
 
     @Override
@@ -681,7 +681,7 @@ final class NettyHttpClient implements
      */
     <I, B> ExecutionFlow<HttpResponse<BodyElements<Event<B>>>> exchangeEventStreamFlow(io.micronaut.http.HttpRequest<I> request, Argument<B> eventType, Argument<?> errorType) {
         return exchangeElementsFlow(request, errorType, AcceptEvents.ADD, true,
-            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize()));
+            (req, response) -> EventStreams.response(response, handlerRegistry, eventType, sizeLimits().maxBufferSize(), this::decorate));
     }
 
     /**
