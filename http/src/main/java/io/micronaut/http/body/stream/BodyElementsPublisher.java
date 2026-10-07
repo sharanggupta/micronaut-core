@@ -27,6 +27,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * {@link BodyElements} as a publisher, without Reactor: one {@link BodyElements#next()} per
@@ -42,6 +43,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class BodyElementsPublisher<T> implements Publisher<T>, Subscription {
 
     private final BodyElements<T> elements;
+    private final @Nullable Consumer<? super T> discard;
     private final AtomicBoolean subscribed = new AtomicBoolean();
     private final AtomicLong requested = new AtomicLong();
     private final AtomicInteger wip = new AtomicInteger();
@@ -54,7 +56,17 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
      * @param elements The elements, which the publisher takes over
      */
     public BodyElementsPublisher(BodyElements<T> elements) {
+        this(elements, null);
+    }
+
+    /**
+     * @param elements The elements, which the publisher takes over
+     * @param discard  Releases an element that arrives once the subscription was cancelled, or
+     *                 {@code null} if an element holds nothing to release
+     */
+    public BodyElementsPublisher(BodyElements<T> elements, @Nullable Consumer<? super T> discard) {
         this.elements = elements;
+        this.discard = discard;
     }
 
     @Override
@@ -126,6 +138,10 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
     private void onRead(@Nullable Optional<T> element, @Nullable Throwable error) {
         Subscriber<? super T> subscriber = downstream;
         if (cancelled || subscriber == null) {
+            // the read was in flight when the subscription was cancelled: nobody takes the element
+            if (discard != null && element != null && element.isPresent()) {
+                discard.accept(element.get());
+            }
             return;
         }
         if (error != null) {

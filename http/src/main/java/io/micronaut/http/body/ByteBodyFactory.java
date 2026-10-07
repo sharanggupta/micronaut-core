@@ -272,7 +272,8 @@ public class ByteBodyFactory {
      */
     @Experimental
     public CloseableByteBody adapt(BodyElements<ReadBuffer> elements) {
-        return adapt(new BodyElementsPublisher<>(elements));
+        // an element read while the body is discarded is closed
+        return adapt(new BodyElementsPublisher<>(elements, ReadBuffer::close));
     }
 
     /**
@@ -286,7 +287,7 @@ public class ByteBodyFactory {
      */
     @Experimental
     public CloseableByteBody adapt(BodyElements<ReadBuffer> elements, OptionalLong contentLength) {
-        return adapt(new BodyElementsPublisher<>(elements), contentLength);
+        return adapt(new BodyElementsPublisher<>(elements, ReadBuffer::close), contentLength);
     }
 
     /**
