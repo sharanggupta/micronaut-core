@@ -114,7 +114,12 @@ public final class NettyJsonStreamHandler<T> implements MessageBodyHandler<T>, C
         for (int i = 0; i < values.size(); i++) {
             try {
                 //noinspection unchecked
-                elements.add(JsonChunkedProcessor.readReleasing(values.get(i), value -> jsonMessageHandler.read((Argument<T>) elementType, mediaType, httpHeaders, value)));
+                Object element = JsonChunkedProcessor.readReleasing(values.get(i), value -> jsonMessageHandler.read((Argument<T>) elementType, mediaType, httpHeaders, value));
+                if (element == null) {
+                    // a JSON null is not an element, as the reactive readers refuse it
+                    throw new CodecException("A JSON null is not an element of a JSON array or stream");
+                }
+                elements.add(element);
             } catch (RuntimeException e) {
                 values.subList(i + 1, values.size()).forEach(JsonChunkedProcessor::release);
                 throw e;
@@ -136,7 +141,7 @@ public final class NettyJsonStreamHandler<T> implements MessageBodyHandler<T>, C
 
     @Override
     public Publisher<T> readChunked(Argument<T> type, @Nullable MediaType mediaType, Headers httpHeaders, Publisher<ByteBuffer<?>> input, long maxElementSize) {
-        return PieceReaders.publisherOfBuffers(input, openPieceReader(type, mediaType, httpHeaders, maxElementSize), JsonPieceReader::adapt);
+        return PieceReaders.publisherOfBuffers(input, openPieceReader(type, mediaType, httpHeaders, maxElementSize), JsonPieceReader::adapt, JsonPieceReader::discardForeign);
     }
 
     @Override
