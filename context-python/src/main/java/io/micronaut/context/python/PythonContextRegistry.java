@@ -785,6 +785,10 @@ final class PythonContextRegistry {
         volatile boolean enterUnsupported;
         /** Whether a Python class declares coroutine methods, keyed by its class cache key. */
         final Map<String, Boolean> coroutineClasses = new ConcurrentHashMap<>();
+        /** Class-bound allocators, keyed by the precomputed class reference cache key. */
+        final Map<String, Value> uninitializedInstanceFactories = new ConcurrentHashMap<>();
+        /** Successfully prepared introduction classes, keyed by the precomputed class reference cache key. */
+        final Set<String> preparedIntroductionClasses = ConcurrentHashMap.newKeySet();
         /**
          * Whether a member of a Python class is an async function, by class and member name: read for every call
          * a caller in another context makes through a wrapper.
@@ -834,6 +838,8 @@ final class PythonContextRegistry {
             }
             pooledHolders.clear();
             coroutineClasses.clear();
+            uninitializedInstanceFactories.clear();
+            preparedIntroductionClasses.clear();
             asyncFunctionKinds.clear();
             helpers.clear();
             classes.clear();

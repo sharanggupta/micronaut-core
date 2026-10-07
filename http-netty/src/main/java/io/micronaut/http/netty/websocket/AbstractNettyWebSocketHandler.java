@@ -26,6 +26,7 @@ import io.micronaut.core.bind.exceptions.UnsatisfiedArgumentException;
 import io.micronaut.core.convert.ConversionService;
 import io.micronaut.core.execution.ExecutionFlow;
 import io.micronaut.core.io.buffer.ByteBuffer;
+import io.micronaut.core.propagation.PropagatedContext;
 import io.micronaut.core.type.Argument;
 import io.micronaut.core.util.CollectionUtils;
 import io.micronaut.http.HttpRequest;
@@ -63,11 +64,8 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketVersion;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.jspecify.annotations.Nullable;
-import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.publisher.Flux;
-import reactor.core.scheduler.Schedulers;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -286,18 +284,6 @@ public abstract class AbstractNettyWebSocketHandler extends SimpleChannelInbound
     protected abstract NettyWebSocketSession createWebSocketSession(ChannelHandlerContext ctx);
 
     /**
-     * Subclasses can override to customize publishers returned from message handlers.
-     *
-     * @param ctx    The context
-     * @param result The result
-     * @return The flowable
-     */
-    protected Publisher<?> instrumentPublisher(ChannelHandlerContext ctx, @Nullable Object result) {
-        Publisher<?> actual = Publishers.convertToPublisher(conversionService, result);
-        return Flux.from(actual).subscribeOn(Schedulers.fromExecutorService(ctx.channel().eventLoop()));
-    }
-
-    /**
      * Invokes the given executable.
      *
      * @param boundExecutable The bound executable
@@ -312,7 +298,7 @@ public abstract class AbstractNettyWebSocketHandler extends SimpleChannelInbound
             return ExecutionFlow.error(e);
         }
         if (Publishers.isConvertibleToPublisher(result)) {
-            return ReactiveExecutionFlow.fromPublisher(Publishers.convertToPublisher(conversionService, result));
+            return ReactiveExecutionFlow.fromPublisherEager(Publishers.convertToPublisher(conversionService, result), PropagatedContext.getOrEmpty());
         } else {
             return ExecutionFlow.just(result);
         }
@@ -350,7 +336,6 @@ public abstract class AbstractNettyWebSocketHandler extends SimpleChannelInbound
             } else {
                 Argument<?> bodyArgument = this.getBodyArgument();
                 Object data;
-                ByteBuf content = null;
 
                 if (WebSocketFrame.class.isAssignableFrom(bodyArgument.getType())) {
                     data = msg.retain();
@@ -373,6 +358,7 @@ public abstract class AbstractNettyWebSocketHandler extends SimpleChannelInbound
                         return;
                     }
 
+                    ByteBuf content;
                     CompositeByteBuf buffer = frameBuffer.getAndSet(null);
                     if (buffer == null) {
                         content = msgContent;
@@ -382,38 +368,32 @@ public abstract class AbstractNettyWebSocketHandler extends SimpleChannelInbound
                     }
 
                     data = conversionService.convert(content, ByteBuf.class, bodyArgument).orElse(null);
-                    if (data != null) {
-                        content.release();
-                        content = null;
-                    }
+                    content.release();
                 }
 
-                if (data == null && content != null) {
-                    // the complete payload: a single frame or the assembled fragments
-                    ByteBuf payload = content;
+                if (data == null) {
                     MediaType mediaType;
                     try {
                         mediaType = messageHandler.stringValue(Consumes.class).map(MediaType::of).orElse(MediaType.APPLICATION_JSON_TYPE);
                     } catch (IllegalArgumentException e) {
-                        payload.release();
                         exceptionCaught(ctx, e);
                         return;
                     }
                     try {
                         data = mediaTypeCodecRegistry.findCodec(mediaType)
-                            .map(codec -> codec.decode(bodyArgument, new NettyByteBufferFactory(ctx.alloc()).wrap(payload)))
+                            .map(codec -> codec.decode(bodyArgument, new NettyByteBufferFactory(ctx.alloc()).wrap(msg.content())))
                             .orElse(null);
                     } catch (CodecException e) {
-                        payload.release();
                         messageProcessingException(ctx, e);
                         return;
                     }
-                    MessageBodyReader<?> reader = data == null ? messageBodyHandlerRegistry.findReader(bodyArgument, mediaType).orElse(null) : null;
-                    if (reader == null) {
-                        payload.release();
-                    } else {
-                        ByteBuffer<ByteBuf> byteBuffer = new NettyByteBufferFactory(ctx.alloc()).wrap(payload);
-                        data = reader.read((Argument) bodyArgument, mediaType, new SimpleHttpHeaders(), byteBuffer);
+                    if (data == null) {
+                        MessageBodyReader<?> reader = messageBodyHandlerRegistry.findReader(bodyArgument, mediaType)
+                            .orElse(null);
+                        if (reader != null) {
+                            ByteBuffer<ByteBuf> byteBuffer = new NettyByteBufferFactory(ctx.alloc()).wrap(msg.content().retain());
+                            data = reader.read((Argument) bodyArgument, mediaType, new SimpleHttpHeaders(), byteBuffer);
+                        }
                     }
                 }
 

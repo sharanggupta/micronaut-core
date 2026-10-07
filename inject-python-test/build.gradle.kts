@@ -33,6 +33,7 @@ dependencies {
         exclude(group = "io.micronaut")
     }
     testImplementation(projects.micronautInjectJavaHelper)
+    testImplementation(projects.micronautInjectTestUtils)
     testImplementation(projects.micronautRetry)
     testImplementation(projects.micronautMessaging)
     testImplementation(libs.micronaut.validation)
