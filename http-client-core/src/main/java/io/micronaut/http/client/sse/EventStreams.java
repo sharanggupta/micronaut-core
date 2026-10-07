@@ -38,6 +38,7 @@ import java.io.ByteArrayInputStream;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 /**
  * The events of the response of an {@link AsyncSseClient} exchange, decoded from the body bytes
@@ -68,6 +69,29 @@ public final class EventStreams {
                                                                    MessageBodyHandlerRegistry handlerRegistry,
                                                                    Argument<B> eventType,
                                                                    long maxBufferSize) {
+        return response(response, handlerRegistry, eventType, maxBufferSize, UnaryOperator.identity());
+    }
+
+    /**
+     * The response of an exchange whose body bytes the client received: the events of an event
+     * stream, decoded as they are read, or a body of another type, decoded whole as one event.
+     * The events take over the bytes of the response.
+     *
+     * @param response        The response, with a status that is not an error
+     * @param handlerRegistry The readers of the event data
+     * @param eventType       The event data type
+     * @param maxBufferSize   The maximum size of a line, and of the data of one event
+     * @param decorate        Decorates a failure of the events like the other failures of the
+     *                        client, e.g. with its service id
+     * @param <B>             The event data type
+     * @return The response, whose body is the events
+     */
+    public static <B> HttpResponse<BodyElements<Event<B>>> response(ByteBodyHttpResponse<?> response,
+                                                                   MessageBodyHandlerRegistry handlerRegistry,
+                                                                   Argument<B> eventType,
+                                                                   long maxBufferSize,
+                                                                   UnaryOperator<HttpClientException> decorate) {
+        Function<Throwable, Throwable> wrap = error -> wrap(error, decorate);
         CloseableByteBody body = response.byteBody().move();
         try {
             MediaType contentType = response.getContentType().orElse(null);
@@ -75,13 +99,61 @@ public final class EventStreams {
             BodyElements<Event<B>> elements;
             if (contentType != null && MediaType.TEXT_EVENT_STREAM_TYPE.matches(contentType)) {
                 // the data of each event is JSON
-                elements = new ByteBodyElements<>(body, reader(handlerRegistry, eventType, headers, maxBufferSize), EventStreams::wrap);
+                elements = new ByteBodyElements<>(body, reader(handlerRegistry, eventType, headers, maxBufferSize), wrap);
             } else {
                 // a single body, such as JSON, is one event
                 MediaType mediaType = contentType == null ? MediaType.APPLICATION_JSON_TYPE : contentType;
-                elements = new SingleBodyElements<>(body, dataReader(handlerRegistry, eventType, mediaType, headers));
+                elements = new SingleBodyElements<>(body, dataReader(handlerRegistry, eventType, mediaType, headers), wrap);
             }
             return ElementsResponse.of(response, elements);
+        } catch (RuntimeException e) {
+            body.close();
+            throw e;
+        }
+    }
+
+    /**
+     * The events of the response of {@code SseClient#eventStream}: the body is read as an event
+     * stream whatever its content type, as that method always read it. A failure to read the
+     * body is an {@link HttpClientException}, decorated like the other failures of the client,
+     * and a failure to decode the data of an event is the failure of the reader of the data, as
+     * it is.
+     *
+     * @param response        The response, with a status that is not an error
+     * @param handlerRegistry The readers of the event data
+     * @param eventType       The event data type
+     * @param maxBufferSize   The maximum size of a line, and of the data of one event
+     * @param decorate        Decorates a failure of the events like the other failures of the
+     *                        client, e.g. with its service id
+     * @param <B>             The event data type
+     * @return The response, whose body is the events
+     */
+    public static <B> HttpResponse<BodyElements<Event<B>>> eventStreamResponse(ByteBodyHttpResponse<?> response,
+                                                                              MessageBodyHandlerRegistry handlerRegistry,
+                                                                              Argument<B> eventType,
+                                                                              long maxBufferSize,
+                                                                              UnaryOperator<HttpClientException> decorate) {
+        Function<Throwable, Throwable> wrap = error -> error instanceof DataDecodeFailure failure && failure.getCause() != null
+            ? failure.getCause()
+            : wrap(error, decorate);
+        CloseableByteBody body = response.byteBody().move();
+        try {
+            MessageBodyReader<B> reader = handlerRegistry.getReader(eventType, List.of(MediaType.APPLICATION_JSON_TYPE));
+            HttpHeaders headers = response.getHeaders();
+            Function<byte[], B> rawFailures = data -> {
+                B decoded;
+                try {
+                    decoded = reader.read(eventType, MediaType.APPLICATION_JSON_TYPE, headers, new ByteArrayInputStream(data));
+                } catch (RuntimeException e) {
+                    throw new DataDecodeFailure(e);
+                }
+                if (decoded == null) {
+                    // as the events were mapped with Objects.requireNonNull
+                    throw new DataDecodeFailure(new NullPointerException("Event data decoded to null for type " + eventType));
+                }
+                return decoded;
+            };
+            return ElementsResponse.of(response, new ByteBodyElements<>(body, new EventReader<>(new EventStreamDecoder(maxBufferSize), rawFailures), wrap));
         } catch (RuntimeException e) {
             body.close();
             throw e;
@@ -113,7 +185,19 @@ public final class EventStreams {
      * @return The failure of the events
      */
     static Throwable wrap(Throwable error) {
-        return error instanceof HttpClientException ? error : new HttpClientException("Error consuming Server Sent Events: " + error.getMessage(), error);
+        return wrap(error, UnaryOperator.identity());
+    }
+
+    /**
+     * The failure of the events, an {@link HttpClientException} decorated like the other failures
+     * of the client.
+     *
+     * @param error    A failure to read or decode the events
+     * @param decorate Decorates the failure, e.g. with the service id of the client
+     * @return The failure of the events
+     */
+    static Throwable wrap(Throwable error, UnaryOperator<HttpClientException> decorate) {
+        return decorate.apply(error instanceof HttpClientException hce ? hce : new HttpClientException("Error consuming Server Sent Events: " + error.getMessage(), error));
     }
 
     private static <B> Function<byte[], B> dataReader(MessageBodyHandlerRegistry handlerRegistry,
@@ -129,6 +213,15 @@ public final class EventStreams {
             }
             return decoded;
         };
+    }
+
+    /**
+     * A failure to decode the data of an event, which {@code eventStream} reports as it is.
+     */
+    private static final class DataDecodeFailure extends RuntimeException {
+        DataDecodeFailure(RuntimeException cause) {
+            super(cause.getMessage(), cause, false, false);
+        }
     }
 
     /**

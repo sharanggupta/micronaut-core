@@ -16,6 +16,7 @@
 package io.micronaut.http.body.stream;
 
 import io.micronaut.core.annotation.Internal;
+import io.micronaut.core.io.buffer.ReferenceCounted;
 import io.micronaut.http.body.BodyElements;
 import org.jspecify.annotations.Nullable;
 import org.reactivestreams.Publisher;
@@ -23,6 +24,8 @@ import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,6 +54,8 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
     private volatile boolean cancelled;
     private volatile boolean reading;
     private volatile boolean done;
+    // only accessed by the drain
+    private boolean closed;
 
     /**
      * @param elements The elements, which the publisher takes over
@@ -62,7 +67,7 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
     /**
      * @param elements The elements, which the publisher takes over
      * @param discard  Releases an element that arrives once the subscription was cancelled, or
-     *                 {@code null} if an element holds nothing to release
+     *                 {@code null} to release a {@link ReferenceCounted} one
      */
     public BodyElementsPublisher(BodyElements<T> elements, @Nullable Consumer<? super T> discard) {
         this.elements = elements;
@@ -91,6 +96,11 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
     @Override
     public void request(long n) {
         if (n <= 0) {
+            if (done || cancelled) {
+                // §3.6: no signal after the terminal one
+                return;
+            }
+            done = true;
             cancel();
             Subscriber<? super T> subscriber = downstream;
             if (subscriber != null) {
@@ -112,10 +122,9 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
 
     @Override
     public void cancel() {
-        if (!cancelled) {
-            cancelled = true;
-            elements.close();
-        }
+        cancelled = true;
+        // closed by the drain, so that closing never races with starting a read
+        drain();
     }
 
     private void drain() {
@@ -124,9 +133,20 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
         }
         int missed = 1;
         while (true) {
-            if (!cancelled && !done && !reading && requested.get() > 0) {
+            if (cancelled) {
+                if (!closed) {
+                    closed = true;
+                    elements.close();
+                }
+            } else if (!done && !reading && requested.get() > 0) {
                 reading = true;
-                elements.next().whenComplete(this::onRead);
+                CompletionStage<Optional<T>> read;
+                try {
+                    read = elements.next();
+                } catch (Throwable e) {
+                    read = CompletableFuture.failedFuture(e);
+                }
+                read.whenComplete(this::onRead);
             }
             missed = wip.addAndGet(-missed);
             if (missed == 0) {
@@ -137,10 +157,10 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
 
     private void onRead(@Nullable Optional<T> element, @Nullable Throwable error) {
         Subscriber<? super T> subscriber = downstream;
-        if (cancelled || subscriber == null) {
-            // the read was in flight when the subscription was cancelled: nobody takes the element
-            if (discard != null && element != null && element.isPresent()) {
-                discard.accept(element.get());
+        if (cancelled || done || subscriber == null) {
+            if (element != null) {
+                // read while the subscription was cancelled: e.g. a reference counted buffer
+                element.ifPresent(this::discard);
             }
             return;
         }
@@ -160,5 +180,14 @@ public final class BodyElementsPublisher<T> implements Publisher<T>, Subscriptio
         subscriber.onNext(element.get());
         reading = false;
         drain();
+    }
+
+    private void discard(T element) {
+        Consumer<? super T> d = discard;
+        if (d != null) {
+            d.accept(element);
+        } else if (element instanceof ReferenceCounted counted) {
+            counted.release();
+        }
     }
 }
