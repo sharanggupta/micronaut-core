@@ -697,6 +697,7 @@ final class DefaultAsyncRequestBody implements AsyncRequestBody, AsyncHandlerBod
      * Reactor. A body that cannot be read as elements fails the first read, like a failure to
      * decode it.
      */
+    @SuppressWarnings("java:S2095") // the elements own the piece reader, and close it
     private <T> BodyElements<T> bodyElements(Argument<T> type, CloseableByteBody body) {
         PieceReader<T> pieceReader;
         try {
