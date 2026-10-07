@@ -40,12 +40,14 @@ import io.micronaut.http.MutableHttpResponse;
 import io.micronaut.http.bind.DefaultRequestBinderRegistry;
 import io.micronaut.http.bind.RequestBinderRegistry;
 import io.micronaut.http.body.AvailableByteBody;
+import io.micronaut.http.body.BodyElements;
 import io.micronaut.http.body.ByteBody;
 import io.micronaut.http.body.CharSequenceBodyWriter;
 import io.micronaut.http.body.CloseableAvailableByteBody;
 import io.micronaut.http.body.CloseableByteBody;
 import io.micronaut.http.body.ContextlessMessageBodyHandlerRegistry;
 import io.micronaut.http.body.MessageBodyHandlerRegistry;
+import io.micronaut.http.body.stream.BodyElementsPublisher;
 import io.micronaut.http.body.stream.BodyPublishers;
 import io.micronaut.http.body.WritableBodyWriter;
 import io.micronaut.http.client.AbstractHttpClient;
@@ -254,6 +256,36 @@ final class NettyHttpClient extends AbstractHttpClient<NettyClientByteBodyRespon
     @Override
     protected ByteBufferFactory<?, ?> byteBufferFactory() {
         return byteBufferFactory;
+    }
+
+    /**
+     * The pieces of the body of {@code dataStream} and {@code exchangeStream}, read as the Netty
+     * client always read them: Netty buffers, as they arrived, with the bytes that wait for the
+     * subscriber limited by {@code max-content-length}.
+     *
+     * @param body  The body, which the pieces take over
+     * @param lines Whether the body is split into the lines of an event stream
+     * @return The pieces of the body
+     */
+    @Override
+    protected BodyElements<ByteBuffer<?>> streamPieces(CloseableByteBody body, boolean lines) {
+        return new StreamedBodyPieces(body, lines, sizeLimits().maxBufferSize());
+    }
+
+    /**
+     * The pieces of the body of {@code dataStream} and {@code exchangeStream}: Netty buffers,
+     * released after {@code onNext} unless the subscriber retained them.
+     *
+     * @param pieces The pieces
+     * @return The publisher of the pieces
+     */
+    @Override
+    protected Publisher<ByteBuffer<?>> streamPiecesPublisher(BodyElements<ByteBuffer<?>> pieces) {
+        if (pieces instanceof StreamedBodyPieces streamed) {
+            return streamed.publisher();
+        }
+        // e.g. the empty body of a response without one
+        return new BodyElementsPublisher<>(pieces);
     }
 
     @Override
